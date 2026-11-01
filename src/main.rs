@@ -6,22 +6,24 @@ use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 
 use eventide::{
-    canonical_city, city_escape, city_menu_origin, city_opening_release, city_press, city_release,
-    city_row_index, city_wheel, config_dir, day_kelvin_from_drag, dialog_origin, dim_control_pair,
-    dim_override_from_saved, dim_override_to_saved, dim_schedule_from_legacy, dimming_enabled,
-    ensure_config_files, format_clock, gdi_index_from_device_name, identity_ramp, lens_alpha,
-    lens_enabled, level_from_saved_index, location_text, monitor_band, monitor_kelvin,
+    brightness_label, canonical_city, city_escape, city_menu_origin, city_opening_release,
+    city_press, city_release, city_wheel, config_dir, coordinate_text, current_language,
+    day_kelvin_from_drag, dialog_origin, dim_control_pair, dim_override_from_saved,
+    dim_override_to_saved, dim_schedule_from_legacy, dimming_enabled, ensure_config_files,
+    filter_places, format_clock, gdi_index_from_device_name, identity_ramp, lens_alpha,
+    lens_enabled, level_from_saved_index, match_language, monitor_band, monitor_kelvin,
     monitor_path, monitors_to_json, nearest_slider_thumb, night_kelvin_from_drag, parse_clock,
-    parse_monitor_file, parse_preset_file, place_tiles, preset_label, preset_menu_names,
-    preset_path, presets_to_json, schedule, scheduled_ramp, scroll_city_wheel, select_city,
-    settings_number, sky_label, slider_track_edges, status_line, step_wake_minute, thumb_x,
-    tile_caption, tile_controls_are_labeled, tile_kelvin, tile_label, tile_zones,
+    parse_coordinate, parse_monitor_file, parse_preset_file, place_display, place_menu_hit,
+    place_tiles, preset_display, preset_label, preset_menu_names, preset_path, presets_to_json,
+    schedule, scheduled_ramp, scroll_city_wheel, select_coordinates, select_place, set_language,
+    settings_number, sky_label, slider_track_edges, status_line_with, step_wake_minute, thumb_x,
+    tile_caption, tile_controls_are_labeled, tile_kelvin, tile_label, tile_zones, tr, tr_1,
     toggled_dim_override, zone_at, CityEffect, ColorControlSize, CustomPreset, DimMoment,
-    DimOverride, DimSchedule, LensSettings, MonitorInput, MonitorSet, PresetChoice, Schedule,
-    ScreenRect, SliderThumb, SunStatus, TilePart, UtcTime, APP_NAME, BRIGHTNESS_LABELS,
-    BUILTIN_PRESETS, CITIES, CITY_MENU_ROWS, CLIENT_HEIGHT, CLIENT_WIDTH, DEFAULT_REVERT_MINUTE,
-    DEFAULT_TRANSITION_MINUTE, EARLIER_REG_KEY, LEGACY_REG_KEY, LENS_EXTENDED_STYLE, LENS_FILL,
-    LENS_RAISE_FLAGS, PRIOR_REG_KEY, REG_KEY, SLIDER_MAX_KELVIN,
+    DimOverride, DimSchedule, LensSettings, MonitorInput, MonitorSet, PlaceHit, PresetChoice,
+    Schedule, ScreenRect, SliderThumb, SunStatus, TilePart, UtcTime, APP_NAME, BUILTIN_PRESETS,
+    CITY_MENU_ROWS, CLIENT_HEIGHT, CLIENT_WIDTH, DEFAULT_REVERT_MINUTE, DEFAULT_TRANSITION_MINUTE,
+    EARLIER_REG_KEY, LEGACY_REG_KEY, LENS_EXTENDED_STYLE, LENS_FILL, LENS_RAISE_FLAGS, PLACES,
+    PRIOR_REG_KEY, REG_KEY, SLIDER_MAX_KELVIN, UI_LANGUAGES,
 };
 use windows::core::{s, PCSTR, PCWSTR};
 use windows::Win32::Devices::Display::GAMMARAMP;
@@ -32,7 +34,10 @@ use windows::Win32::Devices::Display::{
     QDC_ONLY_ACTIVE_PATHS,
 };
 use windows::Win32::Foundation::{
-    COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WIN32_ERROR, WPARAM,
+    COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, SYSTEMTIME, WIN32_ERROR, WPARAM,
+};
+use windows::Win32::Globalization::{
+    GetTimeFormatEx, GetUserDefaultUILanguage, LCIDToLocaleName, TIME_NOSECONDS,
 };
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows::Win32::Graphics::Gdi::{
@@ -68,9 +73,10 @@ use windows::Win32::UI::Shell::{
     NOTIFYICONDATAA,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuA, CallWindowProcW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExA,
+    AppendMenuW, CallWindowProcW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExA,
     DefWindowProcA, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageA, FindWindowA,
-    DrawIconEx, GetClientRect, GetCursorPos, GetMessageA, GetSystemMetrics, GetWindowRect,
+    DrawIconEx, GetClientRect, GetCursorPos, GetMessageA, GetParent, GetSystemMetrics,
+    GetWindowRect,
     GetWindowTextW, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, LoadIconW,
     PostMessageA, PostQuitMessage, RegisterClassExA, SendMessageW, SetCursor, SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
@@ -95,6 +101,7 @@ const CLASS_LENS: &str = "EvenTideOverlay";
 const CLASS_SAVE: &str = "EvenTideSave";
 const CLASS_TIME: &str = "EvenTideTime";
 const CLASS_CITY: &str = "EvenTideCity";
+const CLASS_COORD: &str = "EvenTideCoord";
 const CLASS_ABOUT: &str = "EvenTideAbout";
 const TRAY_MSG: u32 = 0x405;
 const TIMER_PAINT: usize = 1;
@@ -106,6 +113,8 @@ const CMD_ABOUT: u32 = 6;
 const CMD_BRIGHTNESS: u32 = 100;
 const CMD_PRESET: u32 = 200;
 const CMD_CITY: u32 = 400;
+const CMD_COORDS: u32 = 9000;
+const CMD_LANG: u32 = 1600;
 const SAVE_NAME_NEW: u32 = 1110;
 const SAVE_NAME_PRESET: u32 = 1111;
 const TIME_TRANSITION: u32 = 1120;
@@ -139,12 +148,9 @@ const ICON_256: &[u8] = include_bytes!("../assets/icon-256.bgra");
 const ABOUT_WIDTH: i32 = 440;
 const ABOUT_ICON: i32 = 48;
 const ABOUT_MARGIN: i32 = 24;
-const ABOUT_DESCRIPTION: &str =
-    "EvenTide dims the monitors you choose and shifts their color from daylight to nighttime.";
 const ABOUT_COPYRIGHT: &str = "\u{00A9} 2026 clintljohnson";
-const ABOUT_VERSION: &str = concat!("Version ", env!("CARGO_PKG_VERSION"));
 const ABOUT_LINKS: &[(&str, &str)] = &[
-    ("MIT License", "https://opensource.org/license/mit"),
+    ("about-license", "https://opensource.org/license/mit"),
     (
         "github.com/clintljohnson/EvenTide",
         "https://github.com/clintljohnson/EvenTide",
@@ -286,6 +292,12 @@ thread_local! {
     static CITY_CHOICE: Cell<i32> = const { Cell::new(-1) };
     static CITY_WHEEL: Cell<i32> = const { Cell::new(0) };
     static CITY_ARMED: Cell<bool> = const { Cell::new(false) };
+    static PLACE_EDIT: Cell<isize> = const { Cell::new(0) };
+    static PLACE_EDIT_PROC: Cell<isize> = const { Cell::new(0) };
+}
+
+thread_local! {
+    static PLACE_FILTER: RefCell<Vec<usize>> = RefCell::new(Vec::new());
 }
 
 fn main() {
@@ -370,6 +382,13 @@ unsafe fn run() {
     let _ = register_class(
         leak_cstr(CLASS_CITY),
         city_proc,
+        instance,
+        HICON::default(),
+        HICON::default(),
+    );
+    let _ = register_class(
+        leak_cstr(CLASS_COORD),
+        coord_proc,
         instance,
         HICON::default(),
         HICON::default(),
@@ -942,9 +961,13 @@ fn on_command(hwnd: HWND, id: u32) {
         }
         return;
     }
-    if (CMD_CITY..CMD_CITY + CITIES.len() as u32).contains(&id) {
-        let city = CITIES[(id - CMD_CITY) as usize];
-        APP.with(|app| select_city(&mut app.borrow_mut().settings, &city));
+    if id == CMD_COORDS {
+        open_coordinates(hwnd);
+        return;
+    }
+    if (CMD_CITY..CMD_CITY + PLACES.len() as u32).contains(&id) {
+        let place = PLACES[(id - CMD_CITY) as usize];
+        APP.with(|app| select_place(&mut app.borrow_mut().settings, &place));
         unsafe {
             apply_gamma();
             let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1033,23 +1056,61 @@ unsafe fn paint(hwnd: HWND) {
     );
     let tiles = current_tiles();
     let labeled = tile_controls_are_labeled(tiles.len());
-    draw_command_button(buffer, fonts[1], brightness_rect(), "Brightness");
+    draw_command_button(buffer, fonts[1], brightness_rect(), &tr("brightness"));
     draw_gear_button(buffer, gear_rect());
-    draw_command_button(buffer, fonts[1], save_rect(), "Save preset");
+    draw_command_button(buffer, fonts[1], save_rect(), &tr("save-preset"));
     let dim_on = dimming_enabled(dim_schedule, dim_moment(&planned, &local_time()), mode);
     let dim_bounds = live_dim_rect();
-    draw_pill(buffer, fonts[1], dim_bounds, dimming_label(dim_on), dim_on);
-    let header = sky_label(planned.altitude_deg, planned.solar_hours);
-    let header_size = text_size(buffer, fonts[0], header);
+    let dim_label = dimming_label(dim_on);
+    draw_pill(buffer, fonts[1], dim_bounds, &dim_label, dim_on);
+    let header = sky_text(planned.altitude_deg, planned.solar_hours);
+    let header_size = text_size(buffer, fonts[0], &header);
     let header_row = header_row();
+    let header_y = header_row.top + (header_row.bottom - header_row.top - header_size.cy) / 2;
+    let right = right_edge();
     text(
         buffer,
         fonts[0],
         INK,
-        right_edge() - header_size.cx,
-        header_row.top + (header_row.bottom - header_row.top - header_size.cy) / 2,
-        header,
+        right - header_size.cx,
+        header_y,
+        &header,
     );
+    let degrees = coordinate_text(settings.latitude_hundredths, settings.longitude_hundredths);
+    let city_label = place_display(&settings.city);
+    let gap = " - ";
+    let line_y = header_y + header_size.cy + 2;
+    let degrees_size = text_size(buffer, fonts[1], &degrees);
+    let gap_size = text_size(buffer, fonts[1], gap);
+    let city_size = text_size(buffer, fonts[1], &city_label);
+    let line_w = degrees_size.cx + gap_size.cx + city_size.cx;
+    let line_x = right - line_w;
+    text(buffer, fonts[1], MUTED, line_x, line_y, &degrees);
+    text(
+        buffer,
+        fonts[1],
+        MUTED,
+        line_x + degrees_size.cx,
+        line_y,
+        gap,
+    );
+    text(
+        buffer,
+        fonts[1],
+        INK,
+        line_x + degrees_size.cx + gap_size.cx,
+        line_y,
+        &city_label,
+    );
+    let text_h = degrees_size.cy.max(city_size.cy).max(14);
+    APP.with(|app| {
+        app.borrow_mut().location_hit = RECT {
+            left: line_x - 8,
+            top: line_y - 4,
+            right: right + 8,
+            bottom: line_y + text_h + 4,
+        };
+    });
     let active = planned.kelvin;
     let hover = APP.with(|app| app.borrow().color_hover);
     for tile in &tiles {
@@ -1073,13 +1134,13 @@ unsafe fn paint(hwnd: HWND) {
             hover,
         );
     }
-    let name = preset_label(
+    let name = preset_display(&preset_label(
         settings.day_kelvin,
         settings.night_kelvin,
         settings.late_kelvin,
         &customs,
         preset_choice.as_ref(),
-    );
+    ));
     draw_preset(buffer, fonts[1], &name);
     draw_curve(buffer, planned.solar_hours, planned.status == SunStatus::Up);
     draw_slider(buffer, settings.day_kelvin, settings.night_kelvin);
@@ -1120,7 +1181,7 @@ unsafe fn paint(hwnd: HWND) {
     if let Some((thumb, kelvin)) = bubble {
         draw_temperature_bubble(buffer, fonts[1], thumb, kelvin);
     }
-    let sentence = status_line(&planned);
+    let sentence = status_line_with(&planned, format_clock_local);
     let sentence_w = text_width(buffer, fonts[1], &sentence);
     let sentence_x = track.left + (track.right - track.left - sentence_w) / 2;
     text(
@@ -1131,23 +1192,6 @@ unsafe fn paint(hwnd: HWND) {
         track.bottom + 18,
         &sentence,
     );
-    let degrees = degrees_text(settings.latitude_hundredths, settings.longitude_hundredths);
-    let degrees_size = text_size(buffer, fonts[3], &degrees);
-    let city_size = text_size(buffer, fonts[1], &settings.city);
-    let right = CLIENT_WIDTH - 24;
-    let degrees_x = right - degrees_size.cx;
-    let city_x = right - city_size.cx;
-    text(buffer, fonts[3], MUTED, degrees_x, 300, &degrees);
-    text(buffer, fonts[1], INK, city_x, 320, &settings.city);
-    let text_bottom = 320 + city_size.cy.max(16);
-    APP.with(|app| {
-        app.borrow_mut().location_hit = RECT {
-            left: degrees_x.min(city_x) - 16,
-            top: 300 - 16,
-            right: right + 16,
-            bottom: text_bottom + 16,
-        };
-    });
     if preset_warning {
         text(
             buffer,
@@ -1155,7 +1199,7 @@ unsafe fn paint(hwnd: HWND) {
             BLUE_DEEP,
             24,
             dim_bounds.top - 20,
-            "Preset file was not read.",
+            &tr("preset-file-unread"),
         );
     } else if monitor_warning {
         text(
@@ -1164,7 +1208,7 @@ unsafe fn paint(hwnd: HWND) {
             BLUE_DEEP,
             24,
             dim_bounds.top - 20,
-            "Monitor list was not read.",
+            &tr("monitor-file-unread"),
         );
     }
     let _ = BitBlt(
@@ -1600,10 +1644,10 @@ unsafe fn draw_slider_thumb(dc: HDC, x: i32, track: RECT, color: u32) {
 
 unsafe fn draw_temperature_bubble(dc: HDC, font: HFONT, thumb: SliderThumb, kelvin: i32) {
     let label = match thumb {
-        SliderThumb::Day => "Day Temperature",
-        SliderThumb::Night => "Night Temperature",
+        SliderThumb::Day => tr("day-temperature"),
+        SliderThumb::Night => tr("night-temperature"),
     };
-    let size = text_size(dc, font, label);
+    let size = text_size(dc, font, &label);
     let track = slider_track();
     let anchor = thumb_x(track.left, track.right, kelvin);
     let body_w = size.cx + 28;
@@ -1659,7 +1703,7 @@ unsafe fn draw_temperature_bubble(dc: HDC, font: HFONT, thumb: SliderThumb, kelv
         NAVY,
         left + (body_w - size.cx) / 2,
         body_top + (body_h - size.cy) / 2,
-        label,
+        &label,
     );
 }
 
@@ -2028,10 +2072,10 @@ fn preset_pulldown_width() -> i32 {
         let app = app.borrow();
         let mut names: Vec<String> = BUILTIN_PRESETS
             .iter()
-            .map(|preset| preset.name.to_string())
+            .map(|preset| preset_display(preset.name))
             .collect();
         names.extend(app.customs.iter().map(|preset| preset.name.clone()));
-        names.push("Custom".to_string());
+        names.push(preset_display("Custom"));
         (app.font_body, names)
     });
     unsafe {
@@ -2070,10 +2114,26 @@ fn preset_rect() -> RECT {
 
 fn save_rect() -> RECT {
     let preset = preset_rect();
+    let label = tr("save-preset");
+    let text_w = APP.with(|app| {
+        let font = app.borrow().font_body;
+        unsafe {
+            let dc = GetDC(None);
+            let width = if dc.is_invalid() {
+                110
+            } else {
+                let width = text_width(dc, font, &label);
+                let _ = ReleaseDC(None, dc);
+                width
+            };
+            width
+        }
+    });
+    let width = (text_w + 36).clamp(138, 240);
     RECT {
         left: preset.right + 8,
         top: 12,
-        right: preset.right + 146,
+        right: preset.right + 8 + width,
         bottom: 44,
     }
 }
@@ -2130,7 +2190,8 @@ fn time_clock_width() -> i32 {
         if dc.is_invalid() {
             return 108;
         }
-        let width = text_width(dc, font, "12:00 PM");
+        let width = text_width(dc, font, &format_clock_local(20 * 60))
+            .max(text_width(dc, font, &format_clock_local(0)));
         let _ = ReleaseDC(None, dc);
         width.max(1)
     }
@@ -2156,11 +2217,6 @@ fn rect_from(rect: ScreenRect) -> RECT {
     }
 }
 
-fn degrees_text(latitude_hundredths: i32, longitude_hundredths: i32) -> String {
-    let full = location_text(latitude_hundredths, longitude_hundredths);
-    full.trim_start_matches("Location: ").to_string()
-}
-
 fn time_edit_bounds(outer: RECT) -> RECT {
     let font = APP.with(|app| app.borrow().font_wake_edit);
     let text_h = unsafe {
@@ -2168,7 +2224,7 @@ fn time_edit_bounds(outer: RECT) -> RECT {
         let height = if dc.is_invalid() {
             18
         } else {
-            text_size(dc, font, "12:30 AM").cy.max(1)
+            text_size(dc, font, &format_clock_local(12 * 60 + 30)).cy.max(1)
         };
         if !dc.is_invalid() {
             let _ = ReleaseDC(None, dc);
@@ -2205,7 +2261,7 @@ fn open_time_edit(parent: HWND, field: TimeField) {
             } else {
                 DEFAULT_REVERT_MINUTE
             });
-        format_clock(minute)
+        format_clock_local(minute)
     });
     let outer = match field {
         TimeField::Transition => time_transition_clock_rect(),
@@ -2355,15 +2411,16 @@ unsafe extern "system" fn time_edit_proc(
     CallWindowProcW(proc, hwnd, msg, wparam, lparam)
 }
 
-unsafe fn fill_brightness_menu(menu: HMENU, kept: &mut Vec<CString>) {
+unsafe fn fill_brightness_menu(menu: HMENU, kept: &mut Vec<Vec<u16>>) {
     let index = APP.with(|app| app.borrow().settings.brightness_index);
-    for (offset, label) in BRIGHTNESS_LABELS.iter().enumerate() {
+    for offset in 0..9 {
         let flags = if offset as u32 == index {
             MF_STRING | MF_CHECKED
         } else {
             MF_STRING
         };
-        append(menu, flags, CMD_BRIGHTNESS + offset as u32, label, kept);
+        let label = brightness_label(offset);
+        append(menu, flags, CMD_BRIGHTNESS + offset as u32, &label, kept);
     }
 }
 
@@ -2385,13 +2442,14 @@ unsafe fn show_tray_menu(hwnd: HWND) {
             dimming_enabled(app.dim_schedule, moment, app.dim_override)
         })
     };
-    append(menu, MF_STRING, CMD_DIM, dimming_label(dim_on), &mut kept);
+    let dim_label = dimming_label(dim_on);
+    append(menu, MF_STRING, CMD_DIM, &dim_label, &mut kept);
     let brightness = CreatePopupMenu().unwrap_or_default();
     fill_brightness_menu(brightness, &mut kept);
-    append_popup(menu, brightness, "Brightness", &mut kept);
+    append_popup(menu, brightness, &tr("brightness"), &mut kept);
     append(menu, MF_SEPARATOR, 0, "", &mut kept);
     let presets = CreatePopupMenu().unwrap_or_default();
-    append(presets, MF_STRING, CMD_DEFAULT, "Default", &mut kept);
+    append(presets, MF_STRING, CMD_DEFAULT, &tr("default"), &mut kept);
     let customs = APP.with(|app| app.borrow().customs.clone());
     for (index, preset) in customs.iter().enumerate() {
         append(
@@ -2402,9 +2460,9 @@ unsafe fn show_tray_menu(hwnd: HWND) {
             &mut kept,
         );
     }
-    append_popup(menu, presets, "Presets", &mut kept);
-    append(menu, MF_STRING, CMD_ABOUT, "About", &mut kept);
-    append(menu, MF_STRING, CMD_EXIT, "Exit", &mut kept);
+    append_popup(menu, presets, &tr("presets"), &mut kept);
+    append(menu, MF_STRING, CMD_ABOUT, &tr("about"), &mut kept);
+    append(menu, MF_STRING, CMD_EXIT, &tr("exit"), &mut kept);
     let _ = SetForegroundWindow(hwnd);
     let mut cursor = POINT::default();
     let _ = GetCursorPos(&mut cursor);
@@ -2496,12 +2554,25 @@ unsafe fn show_about(owner: HWND) {
         close_about_icon();
         return;
     };
+    set_window_title(hwnd, &tr("about-title"));
     if modal {
         let _ = EnableWindow(owner, false);
     }
     APP.with(|app| app.borrow_mut().about_hwnd = hwnd);
     let _ = SetForegroundWindow(hwnd);
     let _ = SetFocus(Some(hwnd));
+}
+
+fn about_version() -> String {
+    tr_1("about-version", "version", env!("CARGO_PKG_VERSION"))
+}
+
+fn about_link_label(label: &str) -> String {
+    if label == "about-license" {
+        tr(label)
+    } else {
+        label.to_string()
+    }
 }
 
 fn close_about_icon() {
@@ -2525,7 +2596,8 @@ unsafe fn about_layout(dc: HDC) -> AboutLayout {
         (app.font_header, app.font_body, app.font_small)
     });
     let title_size = text_size(dc, header, APP_NAME);
-    let version_size = text_size(dc, small, ABOUT_VERSION);
+    let version_text = about_version();
+    let version_size = text_size(dc, small, &version_text);
     let icon = RECT {
         left: ABOUT_MARGIN,
         top: ABOUT_MARGIN,
@@ -2543,6 +2615,7 @@ unsafe fn about_layout(dc: HDC) -> AboutLayout {
         x: text_x,
         y: block_top + title_size.cy.max(18) + 4,
     };
+    let description_text = tr("about-description");
     let mut y = icon.bottom.max(version.y + version_size.cy.max(14)) + 20;
     let mut description = RECT {
         left: ABOUT_MARGIN,
@@ -2556,7 +2629,7 @@ unsafe fn about_layout(dc: HDC) -> AboutLayout {
             body,
             INK,
             &mut description,
-            ABOUT_DESCRIPTION,
+            &description_text,
             DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT,
         );
     }
@@ -2571,7 +2644,8 @@ unsafe fn about_layout(dc: HDC) -> AboutLayout {
     y += text_size(dc, small, ABOUT_COPYRIGHT).cy.max(16) + 12;
     let mut links = Vec::new();
     for (label, url) in ABOUT_LINKS {
-        let size = text_size(dc, body, label);
+        let shown = about_link_label(label);
+        let size = text_size(dc, body, &shown);
         let rect = RECT {
             left: ABOUT_MARGIN,
             top: y,
@@ -2689,7 +2763,7 @@ unsafe fn paint_about(hwnd: HWND) {
         MUTED,
         layout.version.x,
         layout.version.y,
-        ABOUT_VERSION,
+        &about_version(),
     );
     let mut description = layout.description;
     let _ = draw_wrapped(
@@ -2697,7 +2771,7 @@ unsafe fn paint_about(hwnd: HWND) {
         body,
         INK,
         &mut description,
-        ABOUT_DESCRIPTION,
+        &tr("about-description"),
         DT_WORDBREAK | DT_NOPREFIX,
     );
     text(
@@ -2716,7 +2790,7 @@ unsafe fn paint_about(hwnd: HWND) {
             BLUE_DEEP,
             link.rect.left,
             link.rect.top,
-            link.label,
+            &about_link_label(link.label),
         );
     }
     if !underline.is_invalid() {
@@ -2726,7 +2800,7 @@ unsafe fn paint_about(hwnd: HWND) {
         buffer,
         body,
         screen_from(layout.close),
-        "Close",
+        &tr("close"),
         true,
     );
     let _ = BitBlt(
@@ -2845,7 +2919,8 @@ unsafe fn show_preset_menu(hwnd: HWND) {
         } else {
             CMD_PRESET + (index - custom_count) as u32
         };
-        append(menu, MF_STRING, id, name, &mut kept);
+        let shown = preset_display(name);
+        append(menu, MF_STRING, id, &shown, &mut kept);
     }
     show_popup_at(hwnd, menu, preset_rect());
     let _ = DestroyMenu(menu);
@@ -2891,7 +2966,7 @@ unsafe fn show_city_menu(owner: HWND) {
     let row = city_row_px();
     let font = menu_font();
     let width = city_menu_width(font).max(160);
-    let height = row * (CITY_MENU_ROWS + 1);
+    let height = row * (CITY_MENU_ROWS + 2);
     let anchor = APP.with(|app| app.borrow().location_hit);
     let mut hit = POINT {
         x: anchor.right,
@@ -2924,11 +2999,13 @@ unsafe fn show_city_menu(owner: HWND) {
     CITY_ARMED.with(|cell| cell.set(false));
     CITY_OPEN.with(|cell| cell.set(true));
     CITY_FONT.with(|cell| cell.set(font.0 as isize));
+    PLACE_FILTER.with(|filter| *filter.borrow_mut() = filter_places(""));
+    PLACE_EDIT.with(|cell| cell.set(0));
     let instance = GetModuleHandleA(None).unwrap_or_default();
     let popup = CreateWindowExA(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         leak_cstr(CLASS_CITY),
-        leak_cstr("United States"),
+        leak_cstr("Places"),
         style,
         left,
         top,
@@ -2959,10 +3036,17 @@ unsafe fn show_city_menu(owner: HWND) {
         SET_WINDOW_POS_FLAGS(LENS_RAISE_FLAGS) | SWP_NOREDRAW,
     );
     let _ = ShowWindow(popup, SW_SHOW);
+    set_window_title(popup, &tr("places-title"));
+    create_place_search(popup, font);
     let _ = InvalidateRect(Some(popup), None, false);
     let _ = UpdateWindow(popup);
     let _ = SetForegroundWindow(popup);
-    let _ = SetFocus(Some(popup));
+    let edit = place_edit();
+    if edit.0.is_null() {
+        let _ = SetFocus(Some(popup));
+    } else {
+        let _ = SetFocus(Some(edit));
+    }
     let _ = SetCapture(popup);
     let mut msg = MSG::default();
     let mut running = true;
@@ -3039,19 +3123,33 @@ unsafe extern "system" fn city_proc(
         WM_LBUTTONUP => {
             let armed = CITY_ARMED.with(|cell| cell.get());
             let index = city_index_at(lparam_point(lparam).y);
-            match city_release(armed, index) {
-                CityEffect::Choose(index) => {
-                    CITY_CHOICE.with(|cell| cell.set(CMD_CITY as i32 + index));
-                    CITY_OPEN.with(|cell| cell.set(false));
-                }
-                CityEffect::Close => CITY_OPEN.with(|cell| cell.set(false)),
-                CityEffect::Stay => {
-                    if !armed {
-                        CITY_ARMED.with(|cell| cell.set(true));
+            if armed && index == -2 {
+                choose_filtered(-2);
+            } else {
+                match city_release(armed, index) {
+                    CityEffect::Choose(index) => choose_filtered(index),
+                    CityEffect::Close => CITY_OPEN.with(|cell| cell.set(false)),
+                    CityEffect::Stay => {
+                        if !armed {
+                            CITY_ARMED.with(|cell| cell.set(true));
+                        }
                     }
                 }
             }
             LRESULT(0)
+        }
+        WM_COMMAND => {
+            let code = ((wparam.0 >> 16) & 0xFFFF) as u16;
+            if code == 0x0300 {
+                refresh_place_filter();
+            }
+            LRESULT(0)
+        }
+        WM_CTLCOLOREDIT => {
+            let dc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let _ = SetTextColor(dc, COLORREF(GetSysColor(COLOR_MENUTEXT)));
+            let _ = SetBkColor(dc, COLORREF(GetSysColor(COLOR_MENU)));
+            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
         }
         WM_LBUTTONDOWN => {
             let mut client = RECT::default();
@@ -3076,9 +3174,12 @@ unsafe extern "system" fn city_proc(
                 CITY_OPEN.with(|cell| cell.set(false));
             } else if key == VK_RETURN.0 {
                 let hot = CITY_HOT.with(|cell| cell.get());
-                if hot >= 0 {
-                    CITY_CHOICE.with(|cell| cell.set(CMD_CITY as i32 + hot));
-                    CITY_OPEN.with(|cell| cell.set(false));
+                if hot == -2 {
+                    choose_filtered(-2);
+                } else if hot >= 0 {
+                    choose_filtered(hot);
+                } else if shown_place_count() > 0 {
+                    choose_filtered(0);
                 }
             } else if key == VK_DOWN.0 || key == VK_UP.0 {
                 move_city_hot(if key == VK_DOWN.0 { 1 } else { -1 });
@@ -3094,12 +3195,144 @@ fn city_row_px() -> i32 {
 }
 
 fn city_index_at(y: i32) -> i32 {
-    city_row_index(
+    match place_menu_hit(
         y,
         city_row_px(),
         CITY_SCROLL.with(|cell| cell.get()),
-        CITIES.len() as i32,
+        shown_place_count(),
+        CITY_MENU_ROWS,
+    ) {
+        PlaceHit::Coordinates => -2,
+        PlaceHit::Row(index) => index,
+        _ => -1,
+    }
+}
+
+fn shown_place_count() -> i32 {
+    PLACE_FILTER.with(|filter| filter.borrow().len() as i32)
+}
+
+fn place_edit() -> HWND {
+    HWND(PLACE_EDIT.with(|cell| cell.get()) as *mut core::ffi::c_void)
+}
+
+fn choose_filtered(index: i32) {
+    if index == -2 {
+        CITY_CHOICE.with(|cell| cell.set(CMD_COORDS as i32));
+        CITY_OPEN.with(|cell| cell.set(false));
+        return;
+    }
+    if index < 0 {
+        return;
+    }
+    let place = PLACE_FILTER.with(|filter| filter.borrow().get(index as usize).copied());
+    if let Some(place) = place {
+        CITY_CHOICE.with(|cell| cell.set(CMD_CITY as i32 + place as i32));
+        CITY_OPEN.with(|cell| cell.set(false));
+    }
+}
+
+fn refresh_place_filter() {
+    let text = unsafe { edit_text(place_edit(), 128) };
+    let matches = filter_places(&text);
+    PLACE_FILTER.with(|filter| *filter.borrow_mut() = matches);
+    CITY_SCROLL.with(|cell| cell.set(0));
+    CITY_HOT.with(|cell| cell.set(-1));
+    let hwnd = city_hwnd();
+    if !hwnd.0.is_null() {
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+}
+
+unsafe fn edit_text(hwnd: HWND, cap: usize) -> String {
+    let mut buf = vec![0u16; cap.max(1)];
+    let length = if hwnd.0.is_null() {
+        0
+    } else {
+        GetWindowTextW(hwnd, &mut buf)
+    };
+    String::from_utf16_lossy(&buf[..length.max(0) as usize])
+}
+
+unsafe fn create_place_search(parent: HWND, font: HFONT) {
+    let row = city_row_px();
+    let mut client = RECT::default();
+    let _ = GetClientRect(parent, &mut client);
+    let instance = GetModuleHandleA(None).unwrap_or_default();
+    let edit = CreateWindowExA(
+        WINDOW_EX_STYLE::default(),
+        s!("EDIT"),
+        s!(""),
+        WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0x80),
+        4,
+        2,
+        (client.right - 8).max(40),
+        (row - 4).max(16),
+        Some(parent),
+        Some(HMENU(1300isize as _)),
+        Some(instance.into()),
+        None,
     )
+    .unwrap_or_default();
+    if edit.0.is_null() {
+        return;
+    }
+    if !font.is_invalid() {
+        let _ = SendMessageW(
+            edit,
+            WM_SETFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+    }
+    let cue = wide_z(&tr("search"));
+    let _ = SendMessageW(
+        edit,
+        0x1501,
+        Some(WPARAM(0)),
+        Some(LPARAM(cue.as_ptr() as isize)),
+    );
+    let previous = SetWindowLongPtrW(edit, GWLP_WNDPROC, place_edit_proc as *const () as isize);
+    PLACE_EDIT_PROC.with(|cell| cell.set(previous));
+    PLACE_EDIT.with(|cell| cell.set(edit.0 as isize));
+}
+
+unsafe extern "system" fn place_edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_KEYDOWN {
+        let key = wparam.0 as u16;
+        if key == VK_ESCAPE.0 {
+            CITY_OPEN.with(|cell| cell.set(false));
+            return LRESULT(0);
+        }
+        if key == VK_RETURN.0 {
+            let hot = CITY_HOT.with(|cell| cell.get());
+            if hot == -2 {
+                choose_filtered(-2);
+            } else if hot >= 0 {
+                choose_filtered(hot);
+            } else if shown_place_count() > 0 {
+                choose_filtered(0);
+            }
+            return LRESULT(0);
+        }
+        if key == VK_DOWN.0 || key == VK_UP.0 {
+            move_city_hot(if key == VK_DOWN.0 { 1 } else { -1 });
+            return LRESULT(0);
+        }
+    }
+    let previous = PLACE_EDIT_PROC.with(|cell| cell.get());
+    if previous == 0 {
+        return DefWindowProcA(hwnd, msg, wparam, lparam);
+    }
+    let proc: WNDPROC = std::mem::transmute(previous);
+    CallWindowProcW(proc, hwnd, msg, wparam, lparam)
 }
 
 fn set_city_hot(index: i32) {
@@ -3124,7 +3357,7 @@ fn scroll_city_list(raw_delta: i32) {
         &mut pending,
         raw_delta,
         wheel_scroll_lines(),
-        CITIES.len() as i32,
+        shown_place_count(),
         CITY_MENU_ROWS,
     );
     CITY_WHEEL.with(|cell| cell.set(pending));
@@ -3142,22 +3375,42 @@ fn scroll_city_list(raw_delta: i32) {
 }
 
 fn move_city_hot(step: i32) {
-    let max_index = CITIES.len() as i32 - 1;
+    let count = shown_place_count();
     let current = CITY_HOT.with(|cell| cell.get());
-    let next = if current < 0 {
-        CITY_SCROLL.with(|cell| cell.get())
+    let next = if step > 0 {
+        if current == -2 {
+            -2
+        } else if current >= 0 && current + 1 < count {
+            current + 1
+        } else if current < 0 && count > 0 {
+            0
+        } else {
+            -2
+        }
+    } else if current == -2 {
+        if count > 0 {
+            count - 1
+        } else {
+            -2
+        }
+    } else if current > 0 {
+        current - 1
+    } else if count > 0 {
+        0
     } else {
-        (current + step).clamp(0, max_index)
+        -1
     };
-    let max_scroll = (CITIES.len() as i32 - CITY_MENU_ROWS).max(0);
     let mut scroll = CITY_SCROLL.with(|cell| cell.get());
-    if next < scroll {
-        scroll = next;
-    } else if next >= scroll + CITY_MENU_ROWS {
-        scroll = next - CITY_MENU_ROWS + 1;
+    if next >= 0 {
+        let max_scroll = (count - CITY_MENU_ROWS).max(0);
+        if next < scroll {
+            scroll = next;
+        } else if next >= scroll + CITY_MENU_ROWS {
+            scroll = next - CITY_MENU_ROWS + 1;
+        }
+        scroll = scroll.clamp(0, max_scroll);
+        CITY_SCROLL.with(|cell| cell.set(scroll));
     }
-    scroll = scroll.clamp(0, max_scroll);
-    CITY_SCROLL.with(|cell| cell.set(scroll));
     CITY_HOT.with(|cell| cell.set(next));
     let hwnd = city_hwnd();
     if !hwnd.0.is_null() {
@@ -3235,10 +3488,9 @@ unsafe fn menu_font() -> HFONT {
 
 unsafe fn city_menu_width(font: HFONT) -> i32 {
     let dc = CreateCompatibleDC(None);
-    let mut width = text_width(dc, font, "United States");
-    for city in CITIES {
-        width = width.max(text_width(dc, font, &city.label()));
-    }
+    let width = text_width(dc, font, "San Fernando del Valle de Catamarca, AR")
+        .max(text_width(dc, font, &tr("coordinates")))
+        .max(220);
     let _ = DeleteDC(dc);
     width + 36
 }
@@ -3264,14 +3516,6 @@ unsafe fn paint_city_menu(hwnd: HWND) {
     let hot_text = GetSysColor(COLOR_HIGHLIGHTTEXT);
     fill(buffer, client, menu_color);
     let _ = SetBkMode(buffer, TRANSPARENT);
-    text(
-        buffer,
-        font,
-        text_color,
-        12,
-        (row - text_size(buffer, font, "United States").cy) / 2,
-        "United States",
-    );
     let line = RECT {
         left: 0,
         top: row - 1,
@@ -3279,38 +3523,73 @@ unsafe fn paint_city_menu(hwnd: HWND) {
         bottom: row,
     };
     fill(buffer, line, text_color);
-    let max_scroll = (CITIES.len() as i32 - CITY_MENU_ROWS).max(0);
-    for slot in 0..CITY_MENU_ROWS {
-        let index = scroll + slot;
-        if index < 0 || index >= CITIES.len() as i32 {
-            continue;
-        }
-        let top = row * (slot + 1);
+    let shown = shown_place_count();
+    let max_scroll = (shown - CITY_MENU_ROWS).max(0);
+    let labels = PLACE_FILTER.with(|filter| {
+        let filter = filter.borrow();
+        (0..CITY_MENU_ROWS)
+            .filter_map(|slot| {
+                let index = scroll + slot;
+                filter.get(index as usize).copied().map(|place| {
+                    (index, PLACES[place].label())
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    for (slot, (index, label)) in labels.iter().enumerate() {
+        let top = row * (slot as i32 + 1);
         let item = RECT {
             left: 0,
             top,
             right: client.right,
             bottom: top + row,
         };
-        let selected = index == hot;
+        let selected = *index == hot;
         if selected {
             fill(buffer, item, hot_color);
         }
-        let label = CITIES[index as usize].label();
         let color = if selected { hot_text } else { text_color };
-        let text_y = top + (row - text_size(buffer, font, &label).cy) / 2;
-        text(buffer, font, color, 12, text_y, &label);
+        let text_y = top + (row - text_size(buffer, font, label).cy) / 2;
+        text(buffer, font, color, 12, text_y, label);
         if slot == 0 && scroll > 0 {
             let mark = "▲";
             let mark_w = text_width(buffer, font, mark);
             text(buffer, font, color, client.right - mark_w - 8, text_y, mark);
         }
-        if slot == CITY_MENU_ROWS - 1 && scroll < max_scroll {
+        if slot as i32 == CITY_MENU_ROWS - 1 && scroll < max_scroll {
             let mark = "▼";
             let mark_w = text_width(buffer, font, mark);
             text(buffer, font, color, client.right - mark_w - 8, text_y, mark);
         }
     }
+    let coord_top = row * (CITY_MENU_ROWS + 1);
+    let coord = RECT {
+        left: 0,
+        top: coord_top,
+        right: client.right,
+        bottom: coord_top + row,
+    };
+    let coord_hot = hot == -2;
+    if coord_hot {
+        fill(buffer, coord, hot_color);
+    }
+    let divider = RECT {
+        left: 0,
+        top: coord_top,
+        right: client.right,
+        bottom: coord_top + 1,
+    };
+    fill(buffer, divider, text_color);
+    let coord_label = tr("coordinates");
+    let coord_color = if coord_hot { hot_text } else { text_color };
+    text(
+        buffer,
+        font,
+        coord_color,
+        12,
+        coord_top + (row - text_size(buffer, font, &coord_label).cy) / 2,
+        &coord_label,
+    );
     let _ = BitBlt(
         window_dc,
         0,
@@ -3369,22 +3648,22 @@ unsafe fn append(
     flags: MENU_ITEM_FLAGS,
     id: u32,
     text: &str,
-    kept: &mut Vec<CString>,
+    kept: &mut Vec<Vec<u16>>,
 ) {
-    let cstring = CString::new(text).unwrap_or_else(|_| CString::new("").unwrap());
-    let _ = AppendMenuA(menu, flags, id as usize, PCSTR(cstring.as_ptr().cast()));
-    kept.push(cstring);
+    let wide = wide_z(text);
+    let _ = AppendMenuW(menu, flags, id as usize, PCWSTR(wide.as_ptr()));
+    kept.push(wide);
 }
 
-unsafe fn append_popup(menu: HMENU, child: HMENU, text: &str, kept: &mut Vec<CString>) {
-    let cstring = CString::new(text).unwrap_or_else(|_| CString::new("").unwrap());
-    let _ = AppendMenuA(
+unsafe fn append_popup(menu: HMENU, child: HMENU, text: &str, kept: &mut Vec<Vec<u16>>) {
+    let wide = wide_z(text);
+    let _ = AppendMenuW(
         menu,
         MF_POPUP,
         child.0 as usize,
-        PCSTR(cstring.as_ptr().cast()),
+        PCWSTR(wide.as_ptr()),
     );
-    kept.push(cstring);
+    kept.push(wide);
 }
 
 unsafe fn add_tray(hwnd: HWND) {
@@ -3458,12 +3737,21 @@ fn current_preset_label(app: &App) -> String {
     )
 }
 
-fn dimming_label(enabled: bool) -> &'static str {
+fn dimming_label(enabled: bool) -> String {
     if enabled {
-        "Dimming On"
+        tr("dimming-on")
     } else {
-        "Dimming Off"
+        tr("dimming-off")
     }
+}
+
+fn sky_text(altitude_deg: f64, solar_hours: f64) -> String {
+    tr(match sky_label(altitude_deg, solar_hours) {
+        "Dawn" => "sky-dawn",
+        "Dusk" => "sky-dusk",
+        "Nighttime" => "sky-nighttime",
+        _ => "sky-daylight",
+    })
 }
 
 fn toggle_dim_button(hwnd: HWND) {
@@ -3984,7 +4272,419 @@ fn layout_report() -> String {
     lines.join("\n")
 }
 
+unsafe fn show_language_menu(hwnd: HWND) {
+    let mut kept = Vec::new();
+    let menu = CreatePopupMenu().unwrap_or_default();
+    for (index, (tag, name)) in UI_LANGUAGES.iter().enumerate() {
+        let flags = if *tag == current_language() {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        append(menu, flags, CMD_LANG + index as u32, name, &mut kept);
+    }
+    let anchor = time_language_rect();
+    let mut origin = POINT {
+        x: anchor.left,
+        y: anchor.bottom,
+    };
+    let _ = ClientToScreen(hwnd, &mut origin);
+    let _ = SetForegroundWindow(hwnd);
+    let _ = TrackPopupMenu(
+        menu,
+        TPM_RIGHTBUTTON,
+        origin.x,
+        origin.y,
+        Some(0),
+        hwnd,
+        None,
+    );
+    let _ = DestroyMenu(menu);
+}
+
+fn format_clock_local(total_minutes: i32) -> String {
+    let minutes = total_minutes.rem_euclid(24 * 60);
+    unsafe {
+        let time = SYSTEMTIME {
+            wYear: 2000,
+            wMonth: 1,
+            wDay: 1,
+            wHour: (minutes / 60) as u16,
+            wMinute: (minutes % 60) as u16,
+            wSecond: 0,
+            wMilliseconds: 0,
+            wDayOfWeek: 0,
+        };
+        let mut buf = [0u16; 64];
+        let n = GetTimeFormatEx(
+            PCWSTR::null(),
+            TIME_NOSECONDS,
+            Some(&time),
+            None,
+            Some(&mut buf),
+        );
+        if n > 1 {
+            return String::from_utf16_lossy(&buf[..(n as usize) - 1]);
+        }
+    }
+    format_clock(minutes)
+}
+
+unsafe fn set_window_title(hwnd: HWND, title: &str) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    let wide = wide_z(title);
+    let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
+}
+
+unsafe fn apply_saved_language() {
+    let tag = match saved_language() {
+        Some(tag) => tag,
+        None => windows_ui_language(),
+    };
+    set_language(&tag);
+}
+
+unsafe fn saved_language() -> Option<String> {
+    let key = open_key(REG_KEY, KEY_READ.0)?;
+    let value = read_sz(key, "Language");
+    let _ = RegCloseKey(key);
+    value.filter(|tag| !tag.trim().is_empty())
+}
+
+unsafe fn store_language(tag: &str) {
+    if let Ok(key) = create_key() {
+        let _ = write_sz(key, "Language", tag);
+        let _ = RegCloseKey(key);
+    }
+}
+
+unsafe fn windows_ui_language() -> String {
+    let lang = GetUserDefaultUILanguage();
+    let mut buf = [0u16; 85];
+    let n = LCIDToLocaleName(lang as u32, Some(&mut buf), 0);
+    if n <= 1 {
+        return "en".to_string();
+    }
+    let name = String::from_utf16_lossy(&buf[..(n as usize).saturating_sub(1)]);
+    match_language(&name).to_string()
+}
+
+thread_local! {
+    static COORD_LAT: Cell<isize> = const { Cell::new(0) };
+    static COORD_LON: Cell<isize> = const { Cell::new(0) };
+}
+
+struct CoordMetrics {
+    width: i32,
+    height: i32,
+    lat_label: POINT,
+    lat_edit: RECT,
+    lon_label: POINT,
+    lon_edit: RECT,
+    cancel: RECT,
+    save: RECT,
+}
+
+fn coord_metrics() -> CoordMetrics {
+    let font = APP.with(|app| app.borrow().font_body);
+    unsafe {
+        let dc = GetDC(None);
+        let metrics = coord_metrics_dc(dc, font);
+        if !dc.is_invalid() {
+            let _ = ReleaseDC(None, dc);
+        }
+        metrics
+    }
+}
+
+unsafe fn coord_metrics_dc(dc: HDC, font: HFONT) -> CoordMetrics {
+    let latitude = tr("latitude");
+    let longitude = tr("longitude");
+    let lat_size = if dc.is_invalid() {
+        SIZE { cx: 64, cy: 16 }
+    } else {
+        text_size(dc, font, &latitude)
+    };
+    let lon_size = if dc.is_invalid() {
+        SIZE { cx: 72, cy: 16 }
+    } else {
+        text_size(dc, font, &longitude)
+    };
+    let text_h = lat_size.cy.max(lon_size.cy).max(16);
+    let edit_h = text_h + 8;
+    let edit_w = 96;
+    let margin = 16;
+    let gap = 8;
+    let row_y = 12;
+    let lat_edit = RECT {
+        left: margin + lat_size.cx + gap,
+        top: row_y,
+        right: margin + lat_size.cx + gap + edit_w,
+        bottom: row_y + edit_h,
+    };
+    let lon_label_x = lat_edit.right + 16;
+    let lon_edit = RECT {
+        left: lon_label_x + lon_size.cx + gap,
+        top: row_y,
+        right: lon_label_x + lon_size.cx + gap + edit_w,
+        bottom: row_y + edit_h,
+    };
+    let width = lon_edit.right + margin;
+    let label_y = row_y + (edit_h - text_h) / 2;
+    let button_h = 32;
+    let button_top = lat_edit.bottom + 12;
+    let save = RECT {
+        left: width - margin - 88,
+        top: button_top,
+        right: width - margin,
+        bottom: button_top + button_h,
+    };
+    let cancel = RECT {
+        left: save.left - 8 - 88,
+        top: button_top,
+        right: save.left - 8,
+        bottom: button_top + button_h,
+    };
+    CoordMetrics {
+        width,
+        height: button_top + button_h + 12,
+        lat_label: POINT {
+            x: margin,
+            y: label_y,
+        },
+        lat_edit,
+        lon_label: POINT {
+            x: lon_label_x,
+            y: label_y,
+        },
+        lon_edit,
+        cancel,
+        save,
+    }
+}
+
+fn open_coordinates(parent: HWND) {
+    let metrics = coord_metrics();
+    unsafe {
+        let instance = GetModuleHandleA(None).unwrap_or_default();
+        let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_VISIBLE;
+        let mut bounds = RECT {
+            left: 0,
+            top: 0,
+            right: metrics.width,
+            bottom: metrics.height,
+        };
+        let _ =
+            windows::Win32::UI::WindowsAndMessaging::AdjustWindowRect(&mut bounds, style, false);
+        let width = bounds.right - bounds.left;
+        let height = bounds.bottom - bounds.top;
+        let (x, y) = popup_origin(parent, width, height);
+        let hwnd = CreateWindowExA(
+            WINDOW_EX_STYLE(0x101),
+            leak_cstr(CLASS_COORD),
+            leak_cstr("Coordinates"),
+            style,
+            x,
+            y,
+            width,
+            height,
+            Some(parent),
+            None,
+            Some(instance.into()),
+            None,
+        );
+        let Ok(hwnd) = hwnd else {
+            return;
+        };
+        set_window_title(hwnd, &tr("coordinates"));
+        let _ = EnableWindow(parent, false);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+fn coord_edit(cell: &Cell<isize>) -> HWND {
+    HWND(cell.get() as *mut core::ffi::c_void)
+}
+
+unsafe fn paint_coordinates(hwnd: HWND) {
+    let mut paint = PAINTSTRUCT::default();
+    let window_dc = BeginPaint(hwnd, &mut paint);
+    if window_dc.is_invalid() {
+        return;
+    }
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let buffer = CreateCompatibleDC(Some(window_dc));
+    let bitmap = CreateCompatibleBitmap(window_dc, client.right.max(1), client.bottom.max(1));
+    let previous = SelectObject(buffer, bitmap.into());
+    fill(buffer, client, BG);
+    let _ = SetBkMode(buffer, TRANSPARENT);
+    let font = APP.with(|app| app.borrow().font_body);
+    let metrics = coord_metrics_dc(buffer, font);
+    text(
+        buffer,
+        font,
+        MUTED,
+        metrics.lat_label.x,
+        metrics.lat_label.y,
+        &tr("latitude"),
+    );
+    text(
+        buffer,
+        font,
+        MUTED,
+        metrics.lon_label.x,
+        metrics.lon_label.y,
+        &tr("longitude"),
+    );
+    draw_command_button(buffer, font, metrics.cancel, &tr("cancel"));
+    draw_pill(buffer, font, screen_from(metrics.save), &tr("save"), true);
+    let _ = BitBlt(
+        window_dc,
+        0,
+        0,
+        client.right,
+        client.bottom,
+        Some(buffer),
+        0,
+        0,
+        SRCCOPY,
+    );
+    let _ = SelectObject(buffer, previous);
+    let _ = DeleteObject(bitmap.into());
+    let _ = DeleteDC(buffer);
+    let _ = EndPaint(hwnd, &paint);
+}
+
+fn commit_coordinates(hwnd: HWND) -> bool {
+    let lat_text = unsafe { edit_text(COORD_LAT.with(|cell| coord_edit(cell)), 64) };
+    let lon_text = unsafe { edit_text(COORD_LON.with(|cell| coord_edit(cell)), 64) };
+    let Some(latitude) = parse_coordinate(&lat_text, 90.0) else {
+        return false;
+    };
+    let Some(longitude) = parse_coordinate(&lon_text, 180.0) else {
+        return false;
+    };
+    let parent = unsafe { GetParent(hwnd) };
+    APP.with(|app| {
+        select_coordinates(
+            &mut app.borrow_mut().settings,
+            latitude,
+            longitude,
+        )
+    });
+    unsafe {
+        apply_gamma();
+        if let Ok(parent) = parent {
+            if !parent.0.is_null() {
+                let _ = InvalidateRect(Some(parent), None, false);
+            }
+        }
+    }
+    true
+}
+
+unsafe extern "system" fn coord_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_CREATE => {
+            let (lat, lon) = APP.with(|app| {
+                let settings = &app.borrow().settings;
+                (
+                    format!("{:.2}", f64::from(settings.latitude_hundredths) / 100.0),
+                    format!("{:.2}", f64::from(settings.longitude_hundredths) / 100.0),
+                )
+            });
+            let instance = GetModuleHandleA(None).unwrap_or_default();
+            let font = APP.with(|app| app.borrow().font_body);
+            let metrics = coord_metrics();
+            let lat_edit = make_coord_edit(hwnd, instance.into(), metrics.lat_edit, &lat, font);
+            let lon_edit = make_coord_edit(hwnd, instance.into(), metrics.lon_edit, &lon, font);
+            COORD_LAT.with(|cell| cell.set(lat_edit.0 as isize));
+            COORD_LON.with(|cell| cell.set(lon_edit.0 as isize));
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        WM_CTLCOLOREDIT => {
+            let dc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let _ = SetTextColor(dc, COLORREF(BLUE_DEEP));
+            let _ = SetBkColor(dc, COLORREF(0x00FFFFFF));
+            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
+        }
+        WM_PAINT => {
+            paint_coordinates(hwnd);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let point = lparam_point(lparam);
+            let metrics = coord_metrics();
+            if point_in(point, metrics.save) && commit_coordinates(hwnd) {
+                let _ = DestroyWindow(hwnd);
+            } else if point_in(point, metrics.cancel) {
+                let _ = DestroyWindow(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            let parent = GetParent(hwnd).unwrap_or_default();
+            COORD_LAT.with(|cell| cell.set(0));
+            COORD_LON.with(|cell| cell.set(0));
+            if !parent.0.is_null() {
+                let _ = EnableWindow(parent, true);
+                let _ = SetForegroundWindow(parent);
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcA(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe fn make_coord_edit(
+    parent: HWND,
+    instance: windows::Win32::Foundation::HINSTANCE,
+    bounds: RECT,
+    value: &str,
+    font: HFONT,
+) -> HWND {
+    let edit = CreateWindowExA(
+        WINDOW_EX_STYLE::default(),
+        s!("EDIT"),
+        PCSTR(title_ansi(value).as_ptr().cast()),
+        WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0x81),
+        bounds.left,
+        bounds.top,
+        bounds.right - bounds.left,
+        bounds.bottom - bounds.top,
+        Some(parent),
+        None,
+        Some(instance.into()),
+        None,
+    )
+    .unwrap_or_default();
+    if !edit.0.is_null() && !font.is_invalid() {
+        let _ = SendMessageW(
+            edit,
+            WM_SETFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(1)),
+        );
+        let _ = SetWindowTextW(edit, PCWSTR(wide_z(value).as_ptr()));
+    }
+    edit
+}
+
 fn load_state() {
+    unsafe { apply_saved_language() };
     let (settings, auto, mode) = unsafe { load_settings() };
     let _ = ensure_config_files();
     let (customs, presets_writable, preset_warning) = match preset_path() {
@@ -4394,6 +5094,7 @@ fn open_save(parent: HWND) {
             APP.with(|app| app.borrow_mut().save = None);
             return;
         };
+        set_window_title(hwnd, &tr("save-title"));
         let _ = EnableWindow(parent, false);
         APP.with(|app| {
             if let Some(save) = app.borrow_mut().save.as_mut() {
@@ -4674,7 +5375,7 @@ unsafe fn show_save_names(hwnd: HWND) {
     } else {
         MF_STRING
     };
-    append(menu, new_flags, SAVE_NAME_NEW, "New", &mut kept);
+    append(menu, new_flags, SAVE_NAME_NEW, &tr("new"), &mut kept);
     for (index, name) in names.iter().enumerate() {
         let flags = if selected == Some(index) {
             MF_STRING | MF_CHECKED
@@ -4762,8 +5463,8 @@ unsafe fn paint_save(hwnd: HWND) {
                 .customs
                 .get(index)
                 .map(|preset| preset.name.clone())
-                .unwrap_or_else(|| "New".to_string()),
-            None => "New".to_string(),
+                .unwrap_or_else(|| tr("new")),
+            None => tr("new"),
         };
         let editing = app
             .save
@@ -4771,7 +5472,7 @@ unsafe fn paint_save(hwnd: HWND) {
             .is_some_and(|save| save.selected.is_none());
         ([app.font_body, app.font_small], name, editing)
     });
-    text(buffer, fonts[1], MUTED, 24, 16, "Name");
+    text(buffer, fonts[1], MUTED, 24, 16, &tr("name"));
     draw_save_name(buffer, fonts[0], save_name_rect(), &name);
     if editing {
         let field = save_edit_rect();
@@ -4794,10 +5495,10 @@ unsafe fn paint_save(hwnd: HWND) {
         let _ = DeleteObject(pen.into());
     }
     if !editing {
-        draw_command_button(buffer, fonts[0], save_delete_rect(), "Delete");
+        draw_command_button(buffer, fonts[0], save_delete_rect(), &tr("delete"));
     }
-    draw_command_button(buffer, fonts[0], save_cancel_rect(), "Cancel");
-    draw_pill(buffer, fonts[0], screen_from(save_ok_rect()), "Save", true);
+    draw_command_button(buffer, fonts[0], save_cancel_rect(), &tr("cancel"));
+    draw_pill(buffer, fonts[0], screen_from(save_ok_rect()), &tr("save"), true);
     let _ = BitBlt(
         window_dc,
         0,
@@ -5005,6 +5706,7 @@ fn open_time(parent: HWND) {
             WINDOW_EX_STYLE(0x101),
             leak_cstr(CLASS_TIME),
             leak_cstr("Time"),
+            // Title is replaced with the active language after the window exists.
             style,
             x,
             y,
@@ -5019,6 +5721,7 @@ fn open_time(parent: HWND) {
             APP.with(|app| app.borrow_mut().time = None);
             return;
         };
+        set_window_title(hwnd, &tr("time-title"));
         let _ = EnableWindow(parent, false);
         APP.with(|app| {
             if let Some(time) = app.borrow_mut().time.as_mut() {
@@ -5066,8 +5769,22 @@ fn time_schedule_top() -> i32 {
     time_revert_top() + time_block_height(time_revert_revealed()) + 8
 }
 
+fn time_language_top() -> i32 {
+    time_schedule_top() + 36 + 8
+}
+
+fn time_language_rect() -> RECT {
+    let top = time_language_top();
+    RECT {
+        left: 24,
+        top,
+        right: 360,
+        bottom: top + 36,
+    }
+}
+
 fn time_buttons_top() -> i32 {
-    time_schedule_top() + 36 + 16
+    time_language_top() + 36 + 16
 }
 
 fn time_client_height() -> i32 {
@@ -5087,7 +5804,7 @@ fn time_hit(top: i32) -> RECT {
     RECT {
         left: 24,
         top,
-        right: 280,
+        right: 444,
         bottom: top + 36,
     }
 }
@@ -5181,6 +5898,21 @@ unsafe extern "system" fn time_proc(
             time_click(hwnd, lparam_point(lparam));
             LRESULT(0)
         }
+        WM_COMMAND => {
+            let id = (wparam.0 & 0xFFFF) as u32;
+            if (CMD_LANG..CMD_LANG + UI_LANGUAGES.len() as u32).contains(&id) {
+                let tag = UI_LANGUAGES[(id - CMD_LANG) as usize].0;
+                set_language(tag);
+                store_language(tag);
+                set_window_title(hwnd, &tr("time-title"));
+                let parent = APP.with(|app| app.borrow().hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                if !parent.0.is_null() {
+                    let _ = InvalidateRect(Some(parent), None, false);
+                }
+            }
+            LRESULT(0)
+        }
         WM_CLOSE => {
             finish_time_edit(true, true);
             let _ = DestroyWindow(hwnd);
@@ -5229,6 +5961,10 @@ fn time_click(hwnd: HWND, point: POINT) {
     }
     if time_revert_revealed() && point_in(point, time_revert_clock_rect()) {
         open_time_edit(hwnd, TimeField::Revert);
+        return;
+    }
+    if point_in(point, time_language_rect()) {
+        unsafe { show_language_menu(hwnd) };
         return;
     }
     let id = if point_in(point, time_hit(time_transition_top())) {
@@ -5411,7 +6147,7 @@ unsafe fn paint_time(hwnd: HWND) {
         buffer,
         body,
         time_mark(time_transition_top()),
-        "Transition at sunset",
+        &tr("transition-at-sunset"),
         draft.transition_at_sunset,
     );
     if !draft.transition_at_sunset {
@@ -5428,7 +6164,7 @@ unsafe fn paint_time(hwnd: HWND) {
         buffer,
         body,
         time_mark(time_revert_top()),
-        "Revert at sunrise",
+        &tr("revert-at-sunrise"),
         draft.revert_at_sunrise,
     );
     if !draft.revert_at_sunrise {
@@ -5445,11 +6181,22 @@ unsafe fn paint_time(hwnd: HWND) {
         buffer,
         body,
         time_mark(time_schedule_top()),
-        "Dim with schedule",
+        &tr("dim-with-schedule"),
         draft.dim_with_schedule,
     );
-    draw_command_button(buffer, body, time_cancel_rect(), "Cancel");
-    draw_pill(buffer, body, screen_from(time_ok_rect()), "Save", true);
+    let language = UI_LANGUAGES
+        .iter()
+        .find(|(tag, _)| *tag == current_language())
+        .map(|(_, name)| *name)
+        .unwrap_or("English");
+    draw_command_button(
+        buffer,
+        body,
+        time_language_rect(),
+        &format!("{}: {language}", tr("language")),
+    );
+    draw_command_button(buffer, body, time_cancel_rect(), &tr("cancel"));
+    draw_pill(buffer, body, screen_from(time_ok_rect()), &tr("save"), true);
     let _ = BitBlt(
         window_dc,
         0,
@@ -5480,7 +6227,7 @@ unsafe fn paint_time_clock(
         fill(dc, time_box, 0x00FFFFFF);
         stroke_rect(dc, time_box, 0x00000000);
     } else {
-        let clock = format_clock(minute);
+        let clock = format_clock_local(minute);
         let size = text_size(dc, clock_font, &clock);
         text(
             dc,
@@ -5493,4 +6240,21 @@ unsafe fn paint_time_clock(
     }
     draw_step_button(dc, body, time_earlier_rect(top), "−");
     draw_step_button(dc, body, time_later_rect(top), "+");
+}
+
+#[cfg(test)]
+mod clock_format {
+    use super::format_clock_local;
+
+    #[test]
+    fn the_windows_time_pattern_parses_back() {
+        for minute in [0, 7 * 60, 12 * 60, 13 * 60 + 5, 23 * 60 + 59] {
+            let text = format_clock_local(minute);
+            assert_eq!(
+                eventide::parse_clock(&text),
+                Some(minute),
+                "could not parse {text}"
+            );
+        }
+    }
 }

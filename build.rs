@@ -10,6 +10,7 @@ use std::path::PathBuf;
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    generate_places(&manifest, &out_dir);
     // Premultiplied BGRA frames scaled from `Icons\AppIcon-v3.png`.
     let sizes = [16usize, 24, 48, 72, 256];
     let mut images = Vec::new();
@@ -26,6 +27,54 @@ fn main() {
     fs::write(&res_path, write_res(&images))
         .unwrap_or_else(|err| panic!("write {}: {err}", res_path.display()));
     println!("cargo:rustc-link-arg-bins={}", res_path.display());
+}
+
+fn generate_places(manifest: &std::path::Path, out_dir: &std::path::Path) {
+    let path = manifest.join("assets").join("places.tsv");
+    println!("cargo:rerun-if-changed={}", path.display());
+    let text = fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    let mut out = String::from(
+        "// Generated from assets/places.tsv. Natural Earth populated places, public domain.\n",
+    );
+    out.push_str("pub static PLACES: &[Place] = &[\n");
+    for (line_number, line) in text.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let name = parts.next().unwrap_or_else(|| panic!("name on line {line_number}"));
+        let country = parts
+            .next()
+            .unwrap_or_else(|| panic!("country on line {line_number}"));
+        let latitude: i32 = parts
+            .next()
+            .unwrap_or_else(|| panic!("latitude on line {line_number}"))
+            .parse()
+            .unwrap_or_else(|err| panic!("latitude on line {line_number}: {err}"));
+        let longitude: i32 = parts
+            .next()
+            .unwrap_or_else(|| panic!("longitude on line {line_number}"))
+            .parse()
+            .unwrap_or_else(|err| panic!("longitude on line {line_number}: {err}"));
+        let country_name = parts
+            .next()
+            .unwrap_or_else(|| panic!("country name on line {line_number}"));
+        let region = parts.next().unwrap_or("");
+        out.push_str(&format!(
+            "    Place {{ name: \"{}\", country: \"{}\", country_name: \"{}\", region: \"{}\", latitude_hundredths: {latitude}, longitude_hundredths: {longitude} }},\n",
+            rust_string(name),
+            rust_string(country),
+            rust_string(country_name),
+            rust_string(region),
+        ));
+    }
+    out.push_str("];\n");
+    let dest = out_dir.join("places.rs");
+    fs::write(&dest, out).unwrap_or_else(|err| panic!("write {}: {err}", dest.display()));
+}
+
+fn rust_string(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn icon_dib(pixels: &[u8], side: usize) -> Vec<u8> {

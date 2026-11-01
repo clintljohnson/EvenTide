@@ -31,7 +31,9 @@ The preset list holds saved profiles first, then seven built-in color names: Day
 
 The monitor tiles follow the Windows display arrangement and use the same numbers as Settings. Click a tile to include or exclude that display from dimming. Click the temperature on the tile to turn color on or off for that display. Color on follows the schedule. Color off uses the other half of the day: the day temperature at night, and the night temperature while the sun is up. With one display the tile reads `Display` and its number. With seven or more, a corner mark is the color control and the rest of the tile is the dim control. Up to 100 displays are shown.
 
-The coordinates and the city name open a list of one city in each state, plus Washington, DC. The list is compiled into the program. There is no network lookup. The city nearest the first-run location is Jackson, MS.
+The coordinates and the city name open a searchable list of populated places, compiled from the public-domain [Natural Earth](https://www.naturalearthdata.com/) 1:10m set. There is no network lookup. Typing filters by city, region, country code, or country name. **Coordinates** at the bottom of the list stores a latitude and longitude you type, labeled Custom. The first run uses the catalog place nearest 32.4°N, 90.0°W, which is Jackson, Mississippi.
+
+Sunrise and sunset use those coordinates together with the PC's time zone. The list does not change the Windows clock. The time zone has to be the one for the place you pick, or the evening you see will belong to a different clock.
 
 The tray tooltip is **EvenTide**. Left-click shows the window. Right-click opens **Dimming On** or **Dimming Off**, **Brightness**, **Presets**, **About**, and **Exit**.
 
@@ -50,12 +52,14 @@ From this directory:
 
 ```powershell
 cargo test
-cargo build --release
+.\Compile.ps1
 ```
 
 `cargo test` checks the schedule, preset, and layout math. It does not open a window, change a gamma ramp, or write the registry.
 
-The release binary is `target\release\EvenTide.exe`. For day-to-day use from this tree, copy it to `C:\EvenTide\bin\EvenTide.exe` (the layout this repo uses). For an install meant for other accounts on the machine, put `EvenTide.exe` under `C:\Program Files\EvenTide\` — for example `C:\Program Files\EvenTide\EvenTide.exe`. Settings do not live next to the executable, so a Program Files install does not need a writable program folder.
+`Compile.ps1` runs `cargo build --release` and copies the program to `C:\Program Files\EvenTide\bin\EvenTide.exe`. Cargo still writes the build cache under `target`. Settings do not live next to the executable, so that folder does not need to stay writable after the copy.
+
+The place table is `assets\places.tsv`, compiled in by the build script. Window text lives in `assets\locale`. English is the source. Spanish, Simplified Chinese, Brazilian Portuguese, French, German, and Japanese ship as drafts: a missing line falls back to English. EvenTide follows the Windows display language unless `HKCU\Software\EvenTide` `Language` is set to a tag such as `de`. The Time dialog's language row writes that value. Clocks follow the Windows time pattern, including 24-hour clocks. Arabic and Hebrew are not included; the window layout does not mirror.
 
 A debug build is `cargo build`. Its binary is `target\debug\EvenTide.exe`.
 
@@ -67,13 +71,13 @@ Preferences are stored per user under Local AppData (and the registry), so the b
 
 | Location | What it holds |
 |---|---|
-| `HKCU\Software\EvenTide` | Brightness, temperatures, city, coordinates, and the dimming schedule |
+| `HKCU\Software\EvenTide` | Brightness, temperatures, city, coordinates, language, and the dimming schedule |
 | `%LOCALAPPDATA%\EvenTide\presets.json` | Saved preset names and their monitor switches |
 | `%LOCALAPPDATA%\EvenTide\monitors.json` | Which displays currently have dimming and color |
 
 `%LOCALAPPDATA%\EvenTide` is usually `C:\Users\<user>\AppData\Local\EvenTide` (not Roaming — `%APPDATA%` already means Roaming). Monitor layouts are machine-specific, so Local AppData is the right place. On first run EvenTide creates that folder and seeds both JSON files if they are missing (`presets` starts empty; monitors start with dimming and color on every display). A normal exit writes the registry and both JSON files. **Save** in the Time dialog writes the registry immediately. If a JSON file is unreadable, EvenTide keeps the built-in presets and leaves both effects on every display, and it does not overwrite the broken file on exit.
 
-On a machine with no saved settings, the first run uses 70% brightness, 6500K by day, 3400K at night, dimming and color on every display, and Jackson, MS. Both dimming edges follow the sun.
+On a machine with no saved settings, the first run uses 70% brightness, 6500K by day, 3400K at night, dimming and color on every display, and Jackson, Mississippi. Both dimming edges follow the sun. A saved `ST, City` name from an older build still displays. Coordinates stay in effect even when the label is not in the catalog.
 
 ## Add to Startup
 

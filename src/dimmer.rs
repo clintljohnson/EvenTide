@@ -21,6 +21,14 @@ pub const BRIGHTNESS_LABELS: [&str; 9] = [
     "20% (minimum brightness)",
 ];
 
+pub fn brightness_label(index: usize) -> String {
+    match index {
+        0 => crate::i18n::tr("brightness-full"),
+        8 => crate::i18n::tr("brightness-minimum"),
+        n => crate::i18n::tr_1("brightness-step", "percent", &(100 - n * 10).to_string()),
+    }
+}
+
 /// `COLORREF` painted into every lens. Black darkens without a second hue.
 pub const LENS_FILL: u32 = 0;
 

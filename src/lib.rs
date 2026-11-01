@@ -6,14 +6,20 @@
 
 mod color;
 mod dimmer;
+mod i18n;
 
 pub use color::{
-    format_clock, gamma_channel, kelvin_from_fraction, kelvin_to_rgb, location_text, schedule,
-    sky_label, slider_fraction, solar_position, status_line, Schedule, Settings as ColorSettings,
-    SunStatus, UtcTime, DEFAULT_WAKE_MINUTE, SLIDER_MAX_KELVIN,
+    coordinate_text, format_clock, gamma_channel, kelvin_from_fraction, kelvin_to_rgb,
+    location_text, schedule, sky_label, slider_fraction, solar_position, status_line,
+    status_line_with, Schedule, Settings as ColorSettings, SunStatus, UtcTime, DEFAULT_WAKE_MINUTE,
+    SLIDER_MAX_KELVIN,
 };
 pub use dimmer::{
-    layered_alpha, level_from_saved_index, overlay_should_exist, BRIGHTNESS_LABELS, LENS_FILL,
+    brightness_label, layered_alpha, level_from_saved_index, overlay_should_exist,
+    BRIGHTNESS_LABELS, LENS_FILL,
+};
+pub use i18n::{
+    current_language, match_language, set_language, tr, tr_1, tr_2, UI_LANGUAGES,
 };
 
 pub const CLIENT_WIDTH: i32 = 691;
@@ -386,16 +392,16 @@ pub struct LensSettings {
 
 impl LensSettings {
     pub fn seed() -> Self {
-        let city = nearest_city(SEED_LATITUDE_HUNDREDTHS, SEED_LONGITUDE_HUNDREDTHS);
+        let place = nearest_place(SEED_LATITUDE_HUNDREDTHS, SEED_LONGITUDE_HUNDREDTHS);
         Self {
             brightness_index: 3,
             day_kelvin: 6500,
             night_kelvin: 3400,
             late_kelvin: 1900,
             wake_minute: DEFAULT_WAKE_MINUTE,
-            latitude_hundredths: city.latitude_hundredths,
-            longitude_hundredths: city.longitude_hundredths,
-            city: city.label(),
+            latitude_hundredths: place.latitude_hundredths,
+            longitude_hundredths: place.longitude_hundredths,
+            city: place.label(),
         }
     }
 
@@ -706,8 +712,58 @@ pub fn canonical_city(stored: &str) -> String {
     trimmed.to_string()
 }
 
-/// `7:00 AM`, `7:00 PM`, `19:00`, or `7 AM`. Minutes are 0 through 59.
+/// `7:00 AM`, `7:00 PM`, `19:00`, or `7 AM`. Also accepts the markers Windows
+/// uses in other regions (`p. m.`, `午後`, `下午`) so a formatted clock can be parsed.
 pub fn parse_clock(text: &str) -> Option<i32> {
+    let spaced: String = text
+        .trim()
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    if let Some(minute) = parse_clock_basic(&spaced) {
+        return Some(minute);
+    }
+    let mut suffix = None;
+    let mut stripped = spaced.clone();
+    for (marker, pm) in [
+        ("午後", true),
+        ("午前", false),
+        ("下午", true),
+        ("上午", false),
+        ("오후", true),
+        ("오전", false),
+    ] {
+        if stripped.contains(marker) {
+            suffix = Some(pm);
+            stripped = stripped.replace(marker, " ");
+        }
+    }
+    if let Some(pm) = suffix {
+        let digits: String = stripped
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == ':' || c.is_whitespace())
+            .collect();
+        let clock = digits.split_whitespace().next().unwrap_or("");
+        return parse_clock_basic(&format!("{clock} {}", if pm { "pm" } else { "am" }));
+    }
+    let nodot = spaced.replace('.', "");
+    let parts: Vec<&str> = nodot.split_whitespace().collect();
+    if parts.len() == 3
+        && parts[1].eq_ignore_ascii_case("p")
+        && parts[2].eq_ignore_ascii_case("m")
+    {
+        return parse_clock_basic(&format!("{} pm", parts[0]));
+    }
+    if parts.len() == 3
+        && parts[1].eq_ignore_ascii_case("a")
+        && parts[2].eq_ignore_ascii_case("m")
+    {
+        return parse_clock_basic(&format!("{} am", parts[0]));
+    }
+    None
+}
+
+fn parse_clock_basic(text: &str) -> Option<i32> {
     let mut text = text.trim().to_ascii_lowercase();
     text.retain(|c| c != '.');
     if text.is_empty() {
@@ -784,7 +840,8 @@ pub fn parse_clock(text: &str) -> Option<i32> {
     Some(hour24 * 60 + minute)
 }
 
-/// One city in each state, plus the District of Columbia. Coordinates are hundredths of a degree.
+/// One city in each state, plus the District of Columbia. Kept so a saved
+/// `ST, City` or `City, ST` label still displays. The picker uses [`PLACES`].
 pub const CITIES: &[City] = &[
     City {
         name: "Anchorage",
@@ -1111,6 +1168,172 @@ pub fn select_city(settings: &mut LensSettings, city: &City) {
     settings.city = city.label();
 }
 
+/// A populated place from the compiled Natural Earth table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub name: &'static str,
+    pub country: &'static str,
+    pub country_name: &'static str,
+    /// Set when another place shares this name and country code.
+    pub region: &'static str,
+    pub latitude_hundredths: i32,
+    pub longitude_hundredths: i32,
+}
+
+impl Place {
+    /// `Tokyo, JP`, or `Springfield, Illinois, US` when the name is shared.
+    pub fn label(self) -> String {
+        if self.region.is_empty() {
+            format!("{}, {}", self.name, self.country)
+        } else {
+            format!("{}, {}, {}", self.name, self.region, self.country)
+        }
+    }
+}
+
+include!(concat!(env!("OUT_DIR"), "/places.rs"));
+
+pub fn nearest_place(latitude_hundredths: i32, longitude_hundredths: i32) -> &'static Place {
+    PLACES
+        .iter()
+        .min_by_key(|place| {
+            let dlat = i64::from(place.latitude_hundredths - latitude_hundredths);
+            let dlon = i64::from(place.longitude_hundredths - longitude_hundredths);
+            dlat * dlat + dlon * dlon
+        })
+        .expect("place table is not empty")
+}
+
+pub fn select_place(settings: &mut LensSettings, place: &Place) {
+    settings.latitude_hundredths = place.latitude_hundredths;
+    settings.longitude_hundredths = place.longitude_hundredths;
+    settings.city = place.label();
+}
+
+/// Decimal degrees, rounded to hundredths. `limit` is 90 for latitude and 180 for longitude.
+pub fn parse_coordinate(text: &str, limit: f64) -> Option<i32> {
+    let trimmed = text.trim().trim_end_matches(['°', ' ']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (body, hemisphere) = match trimmed.chars().last() {
+        Some('N' | 'n' | 'E' | 'e') => (&trimmed[..trimmed.len() - 1], 1.0),
+        Some('S' | 's' | 'W' | 'w') => (&trimmed[..trimmed.len() - 1], -1.0),
+        _ => (trimmed, 1.0),
+    };
+    let mut value: f64 = body.trim().parse().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    if value > 0.0 {
+        value *= hemisphere;
+    }
+    if value.abs() > limit + 1e-6 {
+        return None;
+    }
+    let hundredths = (value * 100.0).round() as i32;
+    let max = (limit * 100.0).round() as i32;
+    if hundredths.abs() > max {
+        None
+    } else {
+        Some(hundredths)
+    }
+}
+
+pub fn select_coordinates(settings: &mut LensSettings, latitude_hundredths: i32, longitude_hundredths: i32) {
+    settings.latitude_hundredths = latitude_hundredths;
+    settings.longitude_hundredths = longitude_hundredths;
+    settings.city = "Custom".to_string();
+}
+
+/// Places whose name, region, country code, or country name contains `query`.
+/// An empty query returns every place, in catalog order.
+pub fn filter_places(query: &str) -> Vec<usize> {
+    let query = query.trim();
+    if query.is_empty() {
+        return (0..PLACES.len()).collect();
+    }
+    let needle = query.to_lowercase();
+    PLACES
+        .iter()
+        .enumerate()
+        .filter_map(|(index, place)| {
+            let matches = place.name.to_lowercase().contains(&needle)
+                || place.country.to_lowercase().contains(&needle)
+                || place.country_name.to_lowercase().contains(&needle)
+                || place.region.to_lowercase().contains(&needle);
+            if matches {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// `Custom` is the stored label for typed coordinates. Builtin preset names
+/// stay English in settings; this is only the text drawn in a menu.
+pub fn preset_display(name: &str) -> String {
+    let id = match name {
+        "Day and Candle" => "preset-day-and-candle",
+        "Easy on the Eyes" => "preset-easy-on-the-eyes",
+        "Warm All Night" => "preset-warm-all-night",
+        "Desk After Dark" => "preset-desk-after-dark",
+        "Light Touch" => "preset-light-touch",
+        "Hearth" => "preset-hearth",
+        "True Color" => "preset-true-color",
+        "Custom" => "custom",
+        _ => return name.to_string(),
+    };
+    i18n::tr(id)
+}
+
+pub fn place_display(city: &str) -> String {
+    if city == "Custom" {
+        i18n::tr("custom")
+    } else {
+        city.to_string()
+    }
+}
+
+/// Where a click lands in the place popup. The search row is first and
+/// Coordinates is pinned under the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceHit {
+    None,
+    Search,
+    Coordinates,
+    Row(i32),
+}
+
+pub fn place_menu_hit(
+    y: i32,
+    row_px: i32,
+    scroll: i32,
+    shown: i32,
+    list_rows: i32,
+) -> PlaceHit {
+    if row_px <= 0 || y < 0 {
+        return PlaceHit::None;
+    }
+    let row = y / row_px;
+    if row <= 0 {
+        return PlaceHit::Search;
+    }
+    if row == list_rows + 1 {
+        return PlaceHit::Coordinates;
+    }
+    if row > list_rows + 1 {
+        return PlaceHit::None;
+    }
+    let index = scroll + row - 1;
+    if (0..shown).contains(&index) {
+        PlaceHit::Row(index)
+    } else {
+        PlaceHit::None
+    }
+}
+
 /// First-run color, brightness, wake, and monitor membership. The chosen city stays.
 pub fn restore_first_run(
     settings: &mut LensSettings,
@@ -1165,7 +1388,7 @@ pub fn tile_label(number: Option<u32>) -> String {
 /// Text drawn in a tile. One monitor reads `Display 1`. Several keep the number.
 pub fn tile_caption(number: Option<u32>, count: usize) -> String {
     match number {
-        Some(n) if count == 1 => format!("Display {n}"),
+        Some(n) if count == 1 => i18n::tr_1("display", "number", &n.to_string()),
         _ => tile_label(number),
     }
 }
@@ -1929,8 +2152,8 @@ fn utf8_width(first: u8) -> Option<usize> {
     }
 }
 
-/// Rows shown under the "United States" heading.
-pub const CITY_MENU_ROWS: i32 = 30;
+/// Place rows between the search line and the pinned Coordinates row.
+pub const CITY_MENU_ROWS: i32 = 18;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CityEffect {
@@ -2370,15 +2593,24 @@ mod tests {
 
     #[test]
     fn nearest_city_to_the_seed_point_is_in_mississippi() {
-        let city = nearest_city(SEED_LATITUDE_HUNDREDTHS, SEED_LONGITUDE_HUNDREDTHS);
-        assert_eq!(city.state, "MS");
-        assert_eq!(city.name, "Jackson");
+        let legacy = nearest_city(SEED_LATITUDE_HUNDREDTHS, SEED_LONGITUDE_HUNDREDTHS);
+        assert_eq!(legacy.state, "MS");
+        assert_eq!(legacy.name, "Jackson");
+        let place = nearest_place(SEED_LATITUDE_HUNDREDTHS, SEED_LONGITUDE_HUNDREDTHS);
+        assert_eq!(place.name, "Jackson");
+        assert_eq!(place.country, "US");
+        assert!(place.region.contains("Mississippi"));
         let mut settings = LensSettings::seed();
-        select_city(&mut settings, city);
-        assert_eq!(settings.latitude_hundredths, city.latitude_hundredths);
-        assert_eq!(settings.longitude_hundredths, city.longitude_hundredths);
-        assert_eq!(settings.city, "MS, Jackson");
+        assert_eq!(settings.city, place.label());
+        assert_eq!(settings.latitude_hundredths, place.latitude_hundredths);
+        select_place(&mut settings, place);
+        assert_eq!(settings.latitude_hundredths, place.latitude_hundredths);
+        assert_eq!(settings.longitude_hundredths, place.longitude_hundredths);
+        assert_eq!(settings.city, place.label());
         assert_eq!(canonical_city("Jackson, MS"), "MS, Jackson");
+        assert_eq!(canonical_city("MS, Jackson"), "MS, Jackson");
+        assert_eq!(canonical_city("Tokyo, JP"), "Tokyo, JP");
+        assert_eq!(canonical_city("Custom"), "Custom");
         let ordered: Vec<_> = CITIES.iter().map(|city| (city.state, city.name)).collect();
         let mut sorted = ordered.clone();
         sorted.sort();
@@ -2390,8 +2622,45 @@ mod tests {
         assert_eq!(parse_clock("12:00 PM"), Some(12 * 60));
         assert_eq!(parse_clock("19:05"), Some(19 * 60 + 5));
         assert_eq!(parse_clock("7:00:30 PM"), Some(19 * 60));
+        assert_eq!(parse_clock("8:00 p. m."), Some(20 * 60));
+        assert_eq!(parse_clock("午後 8:00"), Some(20 * 60));
+        assert_eq!(parse_clock("上午 7:00"), Some(7 * 60));
         assert!(parse_clock("7:60").is_none());
         assert!(parse_clock("13:00 PM").is_none());
+        assert_eq!(parse_coordinate("32.4", 90.0), Some(3240));
+        assert_eq!(parse_coordinate("32.4 N", 90.0), Some(3240));
+        assert_eq!(parse_coordinate("-90", 90.0), Some(-9000));
+        assert_eq!(parse_coordinate("90.1", 90.0), None);
+        assert_eq!(parse_coordinate("-180", 180.0), Some(-18000));
+        assert_eq!(parse_coordinate("181", 180.0), None);
+        select_coordinates(&mut settings, 3240, -9000);
+        assert_eq!(settings.city, "Custom");
+        assert_eq!(settings.latitude_hundredths, 3240);
+        let tokyo: Vec<_> = filter_places("tokyo")
+            .into_iter()
+            .map(|index| PLACES[index].country)
+            .collect();
+        assert!(tokyo.contains(&"JP"));
+        assert!(filter_places("japan").iter().any(|index| PLACES[*index].name == "Tokyo"));
+        assert!(filter_places("").len() > 1000);
+        assert_eq!(
+            place_menu_hit(10, 22, 0, 40, CITY_MENU_ROWS),
+            PlaceHit::Search
+        );
+        assert_eq!(
+            place_menu_hit(22, 22, 0, 40, CITY_MENU_ROWS),
+            PlaceHit::Row(0)
+        );
+        assert_eq!(
+            place_menu_hit(22 * (CITY_MENU_ROWS + 1), 22, 0, 40, CITY_MENU_ROWS),
+            PlaceHit::Coordinates
+        );
+        assert_eq!(preset_display("True Color"), "True Color");
+        assert_eq!(preset_display("My Custom Preset"), "My Custom Preset");
+        set_language("de");
+        assert_eq!(preset_display("True Color"), tr("preset-true-color"));
+        assert_eq!(preset_display("My Custom Preset"), "My Custom Preset");
+        set_language("en");
         let tile = rect(10, 20, 210, 160);
         let control = ColorControlSize {
             text_width: 52,

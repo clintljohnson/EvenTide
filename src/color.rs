@@ -465,6 +465,10 @@ pub fn format_clock(total_minutes: i32) -> String {
 /// A crossing on the next local calendar day is marked `tomorrow`. Before dawn both
 /// crossings are later today, so neither one is.
 pub fn status_line(schedule: &Schedule) -> String {
+    status_line_with(schedule, format_clock)
+}
+
+pub fn status_line_with(schedule: &Schedule, format: impl Fn(i32) -> String) -> String {
     let marker = if schedule.marker_is_sunset {
         schedule.sunset_minute
     } else {
@@ -482,36 +486,40 @@ pub fn status_line(schedule: &Schedule) -> String {
     } else {
         schedule.sunrise_minute < now
     };
-    let sunset = format!(
-        "Sunset should occur around {}.",
-        clock_with_day(schedule.sunset_minute, sunset_tomorrow)
-    );
-    let sunrise = format!(
-        "Sunrise will occur at {}.",
-        clock_with_day(schedule.sunrise_minute, sunrise_tomorrow)
-    );
+    let sunset_clock = clock_phrase(schedule.sunset_minute, sunset_tomorrow, &format);
+    let sunrise_clock = clock_phrase(schedule.sunrise_minute, sunrise_tomorrow, &format);
+    let sunset = crate::i18n::tr_1("status-sunset", "time", &sunset_clock);
+    let sunrise = crate::i18n::tr_1("status-sunrise", "time", &sunrise_clock);
     if schedule.marker_is_sunset {
-        format!("{sunset} {sunrise}")
+        crate::i18n::tr_2("status-up", "sunset", &sunset, "sunrise", &sunrise)
     } else {
-        format!("{sunrise} {sunset}")
+        crate::i18n::tr_2("status-down", "sunset", &sunset, "sunrise", &sunrise)
     }
 }
 
-fn clock_with_day(minute: i32, tomorrow: bool) -> String {
-    let when = format_clock(minute);
+fn clock_phrase(minute: i32, tomorrow: bool, format: &impl Fn(i32) -> String) -> String {
+    let when = format(minute);
     if tomorrow {
-        format!("{when} tomorrow")
+        crate::i18n::tr_1("clock-tomorrow", "time", &when)
     } else {
         when
     }
 }
 
-pub fn location_text(latitude_hundredths: i32, longitude_hundredths: i32) -> String {
+pub fn coordinate_text(latitude_hundredths: i32, longitude_hundredths: i32) -> String {
     let lat = f64::from(latitude_hundredths) / 100.0;
     let lon = f64::from(longitude_hundredths) / 100.0;
     let ns = if lat >= 0.0 { "N" } else { "S" };
     let ew = if lon >= 0.0 { "E" } else { "W" };
-    format!("Location: {:.1}°{ns}, {:.1}°{ew}", lat.abs(), lon.abs())
+    format!("{:.1}°{ns}, {:.1}°{ew}", lat.abs(), lon.abs())
+}
+
+pub fn location_text(latitude_hundredths: i32, longitude_hundredths: i32) -> String {
+    crate::i18n::tr_1(
+        "location",
+        "coords",
+        &coordinate_text(latitude_hundredths, longitude_hundredths),
+    )
 }
 
 pub fn slider_fraction(kelvin: i32) -> f64 {

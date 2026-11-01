@@ -1,2 +1,5 @@
 /target/
+/bin/
 assets/appicon.ico
+Compile.ps1
+Push2GitRepo.bat
