@@ -12,6 +12,7 @@ about-title = About EvenTide
 about-description = EvenTide dims the monitors you choose and shifts their color from daylight to nighttime.
 about-version = Version { $version }
 about-license = MIT License
+about-places = Place names and coordinates from Natural Earth
 close = Close
 time-title = Time
 save-title = Save preset

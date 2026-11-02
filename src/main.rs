@@ -150,6 +150,7 @@ const ABOUT_ICON: i32 = 48;
 const ABOUT_MARGIN: i32 = 24;
 const ABOUT_COPYRIGHT: &str = "\u{00A9} 2026 clintljohnson";
 const ABOUT_LINKS: &[(&str, &str)] = &[
+    ("about-places", "https://www.naturalearthdata.com/"),
     ("about-license", "https://opensource.org/license/mit"),
     (
         "github.com/clintljohnson/EvenTide",
@@ -2568,7 +2569,7 @@ fn about_version() -> String {
 }
 
 fn about_link_label(label: &str) -> String {
-    if label == "about-license" {
+    if label.starts_with("about-") {
         tr(label)
     } else {
         label.to_string()
@@ -2641,9 +2642,29 @@ unsafe fn about_layout(dc: HDC) -> AboutLayout {
         x: ABOUT_MARGIN,
         y,
     };
-    y += text_size(dc, small, ABOUT_COPYRIGHT).cy.max(16) + 12;
+    y += text_size(dc, small, ABOUT_COPYRIGHT).cy.max(16) + 20;
     let mut links = Vec::new();
+    let license = about_link_label("about-license");
+    let license_size = text_size(dc, body, &license);
+    if let Some((_, url)) = ABOUT_LINKS
+        .iter()
+        .find(|(label, _)| *label == "about-license")
+    {
+        links.push(AboutLink {
+            label: "about-license",
+            url,
+            rect: RECT {
+                left: ABOUT_WIDTH - ABOUT_MARGIN - license_size.cx.max(1),
+                top: icon.top,
+                right: ABOUT_WIDTH - ABOUT_MARGIN,
+                bottom: icon.top + license_size.cy.max(18),
+            },
+        });
+    }
     for (label, url) in ABOUT_LINKS {
+        if *label == "about-license" || *label == "github.com/clintljohnson/EvenTide" {
+            continue;
+        }
         let shown = about_link_label(label);
         let size = text_size(dc, body, &shown);
         let rect = RECT {
@@ -2652,20 +2673,39 @@ unsafe fn about_layout(dc: HDC) -> AboutLayout {
             right: ABOUT_MARGIN + size.cx.max(1),
             bottom: y + size.cy.max(18),
         };
-        y = rect.bottom + 8;
+        y = rect.bottom + 20;
         links.push(AboutLink {
             label,
             url,
             rect,
         });
     }
-    y += 12;
+    y += 8;
     let close = RECT {
         left: ABOUT_WIDTH - ABOUT_MARGIN - 96,
         top: y,
         right: ABOUT_WIDTH - ABOUT_MARGIN,
         bottom: y + 36,
     };
+    if let Some((_, url)) = ABOUT_LINKS
+        .iter()
+        .find(|(label, _)| *label == "github.com/clintljohnson/EvenTide")
+    {
+        let shown = "github.com/clintljohnson/EvenTide";
+        let size = text_size(dc, body, shown);
+        let text_h = size.cy.max(18);
+        let top = close.top + (close.bottom - close.top - text_h) / 2;
+        links.push(AboutLink {
+            label: shown,
+            url,
+            rect: RECT {
+                left: ABOUT_MARGIN,
+                top,
+                right: ABOUT_MARGIN + size.cx.max(1),
+                bottom: top + text_h,
+            },
+        });
+    }
     AboutLayout {
         icon,
         title,

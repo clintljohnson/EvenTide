@@ -12,6 +12,7 @@ about-title = EvenTide について
 about-description = EvenTide は選んだモニターを暗くし、色を昼から夜へ移します。
 about-version = バージョン { $version }
 about-license = MIT ライセンス
+about-places = 地名と座標は Natural Earth より
 close = 閉じる
 time-title = 時刻
 save-title = プリセットを保存

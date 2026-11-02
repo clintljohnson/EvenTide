@@ -12,6 +12,7 @@ about-title = À propos d'EvenTide
 about-description = EvenTide assombrit les moniteurs choisis et fait passer leur couleur du jour à la nuit.
 about-version = Version { $version }
 about-license = Licence MIT
+about-places = Noms de lieux et coordonnées de Natural Earth
 close = Fermer
 time-title = Heure
 save-title = Enregistrer le profil

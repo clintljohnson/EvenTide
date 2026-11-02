@@ -12,6 +12,7 @@ about-title = 关于 EvenTide
 about-description = EvenTide 会调暗你选择的显示器，并把颜色从白昼过渡到夜晚。
 about-version = 版本 { $version }
 about-license = MIT 许可证
+about-places = 地名和坐标来自 Natural Earth
 close = 关闭
 time-title = 时间
 save-title = 保存预设
