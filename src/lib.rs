@@ -7,6 +7,7 @@
 mod color;
 mod dimmer;
 mod i18n;
+mod theme;
 
 pub use color::{
     coordinate_text, format_clock, gamma_channel, kelvin_from_fraction, kelvin_to_rgb,
@@ -21,6 +22,7 @@ pub use dimmer::{
 pub use i18n::{
     current_language, match_language, set_language, tr, tr_1, tr_2, UI_LANGUAGES,
 };
+pub use theme::{palette, ColorScheme, Palette};
 
 pub const CLIENT_WIDTH: i32 = 691;
 pub const CLIENT_HEIGHT: i32 = 672;

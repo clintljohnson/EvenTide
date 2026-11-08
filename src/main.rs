@@ -46,12 +46,13 @@ use windows::Win32::Graphics::Gdi::{
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, EnumDisplayDevicesW,
     EnumDisplayMonitors, FillRect, GetDC, GetMonitorInfoW, GetStockObject, GetSysColor,
     GetTextExtentPoint32W, IntersectClipRect, InvalidateRect, LineTo, MoveToEx, Polygon, Rectangle,
-    ReleaseDC, RestoreDC, RoundRect, SaveDC, ScreenToClient, SelectObject, SetBkColor, SetBkMode,
+    RedrawWindow, ReleaseDC, RestoreDC, RoundRect, SaveDC, ScreenToClient, SelectObject, SetBkColor, SetBkMode,
     SetTextColor, TextOutW, UpdateWindow, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, BLENDFUNCTION, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_MENU, COLOR_MENUTEXT,
     DIB_RGB_COLORS, DISPLAY_DEVICEW, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK,
     HBRUSH, HDC, HFONT, HMONITOR, HOLLOW_BRUSH, LOGFONTA, MONITORINFO, MONITORINFOEXW, PAINTSTRUCT,
-    PS_SOLID, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
+    PS_SOLID, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, SRCCOPY, TRANSPARENT,
+    WHITE_BRUSH,
 };
 use windows::Win32::System::Console::AllocConsole;
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
@@ -86,14 +87,110 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, NONCLIENTMETRICSW, SET_WINDOW_POS_FLAGS,
     SM_CXICON, SM_CXSMICON, SM_CXVIRTUALSCREEN, SM_CYICON, SM_CYMENU, SM_CYSMICON,
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETNONCLIENTMETRICS,
-    SPI_GETWHEELSCROLLLINES, SWP_NOACTIVATE, SWP_NOREDRAW, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_NOREDRAW, SW_HIDE, SW_RESTORE, SW_SHOW,
     SW_SHOWNORMAL, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
     WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_DESTROY, WM_ERASEBKGND,
     WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCLBUTTONDOWN, WM_NULL, WM_PAINT, WM_SETCURSOR, WM_SETFONT, WM_SETICON, WM_TIMER,
+    WM_NCCREATE, WM_NCLBUTTONDOWN, WM_NULL, WM_PAINT, WM_SETCURSOR, WM_SETFONT, WM_SETICON,
+    WM_SETTINGCHANGE, WM_TIMER,
     WNDCLASSEXA, WNDPROC, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
+
+mod appearance;
+
+fn ui() -> eventide::Palette {
+    appearance::colors()
+}
+
+struct MenuColors {
+    bg: u32,
+    text: u32,
+    hot: u32,
+    hot_text: u32,
+    rule: u32,
+}
+
+/// Light menus keep the Windows highlight color. Dark menus use the palette,
+/// because classic `GetSysColor` values stay light. A Linux or macOS port can
+/// always use the palette fields.
+fn menu_colors() -> MenuColors {
+    if appearance::is_dark() {
+        let colors = ui();
+        MenuColors {
+            bg: colors.menu_bg,
+            text: colors.menu_text,
+            hot: colors.menu_hot,
+            hot_text: colors.menu_hot_text,
+            rule: colors.line,
+        }
+    } else {
+        unsafe {
+            MenuColors {
+                bg: GetSysColor(COLOR_MENU),
+                text: GetSysColor(COLOR_MENUTEXT),
+                hot: GetSysColor(COLOR_HIGHLIGHT),
+                hot_text: GetSysColor(COLOR_HIGHLIGHTTEXT),
+                rule: GetSysColor(COLOR_MENUTEXT),
+            }
+        }
+    }
+}
+
+unsafe fn paint_edit(dc: HDC, text_color: u32) -> LRESULT {
+    let _ = SetTextColor(dc, COLORREF(text_color));
+    let _ = SetBkColor(dc, COLORREF(ui().surface));
+    LRESULT(appearance::field_brush().0 as isize)
+}
+
+unsafe fn note_caption(hwnd: HWND, msg: u32) {
+    if msg == WM_NCCREATE {
+        appearance::caption(hwnd);
+    }
+}
+
+unsafe fn repaint_themed_windows() {
+    let mut windows = Vec::new();
+    APP.with(|app| {
+        let app = app.borrow();
+        windows.push(app.hwnd);
+        windows.push(app.about_hwnd);
+        if let Some(save) = app.save.as_ref() {
+            windows.push(save.hwnd);
+        }
+        if let Some(time) = app.time.as_ref() {
+            windows.push(time.hwnd);
+        }
+    });
+    windows.push(HWND(
+        CITY_HWND.with(|cell| cell.get()) as *mut core::ffi::c_void
+    ));
+    windows.push(HWND(
+        COORD_HWND.with(|cell| cell.get()) as *mut core::ffi::c_void
+    ));
+    for hwnd in windows {
+        if hwnd.is_invalid() {
+            continue;
+        }
+        appearance::caption(hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        let _ = RedrawWindow(
+            Some(hwnd),
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE | RDW_FRAME,
+        );
+    }
+}
 
 const CLASS_MAIN: &str = "EvenTide";
 const CLASS_OWNER: &str = "EvenTideOwner";
@@ -126,19 +223,6 @@ const TIME_REVERT_LATER: u32 = 1125;
 const TIME_OK: u32 = 1126;
 const TIME_CANCEL: u32 = 1127;
 const TIME_SCHEDULE: u32 = 1128;
-
-const BG: u32 = 0x00F3F1EF;
-const INK: u32 = 0x00383332;
-const BLUE: u32 = 0x00C49172;
-const BLUE_DEEP: u32 = 0x0094624D;
-const MUTED: u32 = 0x00988880;
-const TILE: u32 = 0x00FFFFFF;
-const TILE_DIM: u32 = 0x00E4DDD6;
-const LINE: u32 = 0x00D5D0CB;
-const TRACK: u32 = 0x00800000;
-const NAVY: u32 = 0x00800000;
-const NIGHT_HANDLE: u32 = 0x00288CF2;
-const DAY_HANDLE: u32 = 0x00F0C67E;
 
 const ICON_16: &[u8] = include_bytes!("../assets/icon-16.bgra");
 const ICON_24: &[u8] = include_bytes!("../assets/icon-24.bgra");
@@ -320,6 +404,7 @@ fn main() {
 }
 
 unsafe fn run() {
+    appearance::install();
     let class = leak_cstr(CLASS_MAIN);
     if let Ok(existing) = FindWindowA(class, None) {
         if !existing.0.is_null() {
@@ -527,6 +612,7 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    note_caption(hwnd, msg);
     match msg {
         WM_CREATE => {
             add_tray(hwnd);
@@ -544,12 +630,13 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
-        WM_CTLCOLOREDIT => {
-            let dc = HDC(wparam.0 as *mut core::ffi::c_void);
-            let _ = SetTextColor(dc, COLORREF(BLUE_DEEP));
-            let _ = SetBkColor(dc, COLORREF(0x00FFFFFF));
-            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
+        WM_SETTINGCHANGE => {
+            if appearance::follow_system() {
+                repaint_themed_windows();
+            }
+            DefWindowProcA(hwnd, msg, wparam, lparam)
         }
+        WM_CTLCOLOREDIT => paint_edit(HDC(wparam.0 as *mut core::ffi::c_void), ui().accent_text),
         WM_TIMER => {
             if wparam.0 == TIMER_RAISE {
                 raise_lenses();
@@ -1016,7 +1103,7 @@ unsafe fn paint(hwnd: HWND) {
     let buffer = CreateCompatibleDC(Some(window_dc));
     let bitmap = CreateCompatibleBitmap(window_dc, client.right.max(1), client.bottom.max(1));
     let previous = SelectObject(buffer, bitmap.into());
-    fill(buffer, client, BG);
+    fill(buffer, client, ui().bg);
     let _ = SetBkMode(buffer, TRANSPARENT);
     let snapshot = APP.with(|app| {
         let app = app.borrow();
@@ -1072,7 +1159,7 @@ unsafe fn paint(hwnd: HWND) {
     text(
         buffer,
         fonts[0],
-        INK,
+        ui().ink,
         right - header_size.cx,
         header_y,
         &header,
@@ -1086,11 +1173,11 @@ unsafe fn paint(hwnd: HWND) {
     let city_size = text_size(buffer, fonts[1], &city_label);
     let line_w = degrees_size.cx + gap_size.cx + city_size.cx;
     let line_x = right - line_w;
-    text(buffer, fonts[1], MUTED, line_x, line_y, &degrees);
+    text(buffer, fonts[1], ui().muted, line_x, line_y, &degrees);
     text(
         buffer,
         fonts[1],
-        MUTED,
+        ui().muted,
         line_x + degrees_size.cx,
         line_y,
         gap,
@@ -1098,7 +1185,7 @@ unsafe fn paint(hwnd: HWND) {
     text(
         buffer,
         fonts[1],
-        INK,
+        ui().ink,
         line_x + degrees_size.cx + gap_size.cx,
         line_y,
         &city_label,
@@ -1155,7 +1242,7 @@ unsafe fn paint(hwnd: HWND) {
     text(
         buffer,
         kelvin_font,
-        INK,
+        ui().ink,
         24,
         track_mid - night_size.cy / 2,
         &night_label,
@@ -1163,7 +1250,7 @@ unsafe fn paint(hwnd: HWND) {
     text(
         buffer,
         kelvin_font,
-        INK,
+        ui().ink,
         right_edge() - day_width,
         track_mid - night_size.cy / 2,
         &day_label,
@@ -1188,7 +1275,7 @@ unsafe fn paint(hwnd: HWND) {
     text(
         buffer,
         fonts[1],
-        NAVY,
+        ui().status,
         sentence_x,
         track.bottom + 18,
         &sentence,
@@ -1197,7 +1284,7 @@ unsafe fn paint(hwnd: HWND) {
         text(
             buffer,
             fonts[3],
-            BLUE_DEEP,
+            ui().accent_text,
             24,
             dim_bounds.top - 20,
             &tr("preset-file-unread"),
@@ -1206,7 +1293,7 @@ unsafe fn paint(hwnd: HWND) {
         text(
             buffer,
             fonts[3],
-            BLUE_DEEP,
+            ui().accent_text,
             24,
             dim_bounds.top - 20,
             &tr("monitor-file-unread"),
@@ -1248,8 +1335,8 @@ unsafe fn draw_tile(
     };
     let on_color = color_enabled(tile.number, color);
     let bounds = rect_from(tile.bounds);
-    fill(dc, bounds, if on_dim { TILE_DIM } else { TILE });
-    stroke_rect(dc, bounds, if on_dim { BLUE } else { LINE });
+    fill(dc, bounds, if on_dim { ui().tile_on } else { ui().tile });
+    stroke_rect(dc, bounds, if on_dim { ui().accent } else { ui().line });
     let zones = tile_layout(dc, tile, labeled, count, kelvin);
     let label = tile_caption(tile.number, count);
     let used_font = if tile.bounds.height() >= 90 {
@@ -1259,7 +1346,7 @@ unsafe fn draw_tile(
     };
     let width = text_width(dc, used_font, &label);
     let number_x = tile.bounds.left + (tile.bounds.width() - width) / 2;
-    text(dc, used_font, INK, number_x, zones.number_y, &label);
+    text(dc, used_font, ui().ink, number_x, zones.number_y, &label);
     let hot = hover.is_some_and(|hit| hit == zones.color);
     if labeled {
         draw_temperature_button(
@@ -1273,10 +1360,10 @@ unsafe fn draw_tile(
     } else {
         let mark = rect_from(zones.color);
         if on_color {
-            fill_round(dc, mark, INK);
+            fill_round(dc, mark, ui().ink);
         }
         if hot {
-            stroke_round(dc, mark, if on_color { 0x00FFFFFF } else { BLUE_DEEP });
+            stroke_round(dc, mark, if on_color { ui().on_ink } else { ui().accent_text });
         }
     }
 }
@@ -1423,16 +1510,16 @@ unsafe fn draw_temperature_button(
         return;
     }
     if on {
-        fill_round(dc, rect, INK);
+        fill_round(dc, rect, ui().ink);
     }
     if hovered {
-        stroke_round(dc, rect, if on { 0x00FFFFFF } else { BLUE_DEEP });
+        stroke_round(dc, rect, if on { ui().on_ink } else { ui().accent_text });
     }
     let size = text_size(dc, font, label);
     text(
         dc,
         font,
-        if on { 0x00FFFFFF } else { INK },
+        if on { ui().on_ink } else { ui().ink },
         rect.left + (rect.right - rect.left - size.cx) / 2,
         rect.top + (rect.bottom - rect.top - size.cy) / 2,
         label,
@@ -1483,8 +1570,8 @@ unsafe fn draw_pill(dc: HDC, font: HFONT, zone: ScreenRect, label: &str, on: boo
     if rect.right <= rect.left || rect.bottom <= rect.top {
         return;
     }
-    let brush = CreateSolidBrush(COLORREF(if on { BLUE } else { 0x00FFFFFF }));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(if on { BLUE_DEEP } else { LINE }));
+    let brush = CreateSolidBrush(COLORREF(if on { ui().accent } else { ui().surface }));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(if on { ui().accent_text } else { ui().line }));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
@@ -1496,7 +1583,7 @@ unsafe fn draw_pill(dc: HDC, font: HFONT, zone: ScreenRect, label: &str, on: boo
     text(
         dc,
         font,
-        if on { 0x00FFFFFF } else { INK },
+        if on { ui().on_accent } else { ui().ink },
         rect.left + ((rect.right - rect.left) - width) / 2,
         rect.top + 6,
         label,
@@ -1504,8 +1591,8 @@ unsafe fn draw_pill(dc: HDC, font: HFONT, zone: ScreenRect, label: &str, on: boo
 }
 
 unsafe fn draw_gear_button(dc: HDC, rect: RECT) {
-    let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(LINE));
+    let brush = CreateSolidBrush(COLORREF(ui().surface));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().line));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, 8, 8);
@@ -1529,8 +1616,8 @@ unsafe fn draw_gear_button(dc: HDC, rect: RECT) {
         points.push(gear_point(cx, cy, root, base + inset + tooth + inset));
         points.push(gear_point(cx, cy, root, base + step - inset));
     }
-    let brush = CreateSolidBrush(COLORREF(INK));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(INK));
+    let brush = CreateSolidBrush(COLORREF(ui().ink));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().ink));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = Polygon(dc, &points);
@@ -1539,8 +1626,8 @@ unsafe fn draw_gear_button(dc: HDC, rect: RECT) {
     let _ = DeleteObject(brush.into());
     let _ = DeleteObject(pen.into());
     let hole = 3;
-    let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(0x00FFFFFF));
+    let brush = CreateSolidBrush(COLORREF(ui().surface));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().surface));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = Ellipse(dc, cx - hole, cy - hole, cx + hole + 1, cy + hole + 1);
@@ -1558,8 +1645,8 @@ fn gear_point(cx: i32, cy: i32, radius: f64, angle: f64) -> POINT {
 }
 
 unsafe fn draw_command_button(dc: HDC, font: HFONT, rect: RECT, label: &str) {
-    let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(LINE));
+    let brush = CreateSolidBrush(COLORREF(ui().surface));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().line));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
@@ -1571,7 +1658,7 @@ unsafe fn draw_command_button(dc: HDC, font: HFONT, rect: RECT, label: &str) {
     text(
         dc,
         font,
-        INK,
+        ui().ink,
         rect.left + (rect.right - rect.left - width) / 2,
         rect.top + 7,
         label,
@@ -1580,8 +1667,8 @@ unsafe fn draw_command_button(dc: HDC, font: HFONT, rect: RECT, label: &str) {
 
 unsafe fn draw_preset(dc: HDC, font: HFONT, label: &str) {
     let rect = preset_rect();
-    let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(LINE));
+    let brush = CreateSolidBrush(COLORREF(ui().surface));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().line));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
@@ -1595,7 +1682,7 @@ unsafe fn draw_preset(dc: HDC, font: HFONT, label: &str) {
     text(
         dc,
         font,
-        INK,
+        ui().ink,
         rect.left + 14,
         rect.top + (rect.bottom - rect.top - size.cy) / 2,
         label,
@@ -1603,7 +1690,7 @@ unsafe fn draw_preset(dc: HDC, font: HFONT, label: &str) {
     if saved != 0 {
         let _ = RestoreDC(dc, saved);
     }
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(MUTED));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().muted));
     let old = SelectObject(dc, pen.into());
     let x = rect.right - 22;
     let y = rect.top + (rect.bottom - rect.top - 4) / 2;
@@ -1616,18 +1703,18 @@ unsafe fn draw_preset(dc: HDC, font: HFONT, label: &str) {
 
 unsafe fn draw_slider(dc: HDC, day_kelvin: i32, night_kelvin: i32) {
     let track = slider_track();
-    fill(dc, track, TRACK);
+    fill(dc, track, ui().track);
     draw_slider_thumb(
         dc,
         thumb_x(track.left, track.right, night_kelvin),
         track,
-        NIGHT_HANDLE,
+        ui().night_handle,
     );
     draw_slider_thumb(
         dc,
         thumb_x(track.left, track.right, day_kelvin),
         track,
-        DAY_HANDLE,
+        ui().day_handle,
     );
 }
 
@@ -1668,8 +1755,8 @@ unsafe fn draw_temperature_bubble(dc: HDC, font: HFONT, thumb: SliderThumb, kelv
         right -= shift;
     }
     let tip_x = anchor.clamp(left + 16, right - 16);
-    let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(NAVY));
+    let brush = CreateSolidBrush(COLORREF(ui().surface));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().status));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = RoundRect(dc, left, body_top, right, body_bottom, body_h, body_h);
@@ -1692,7 +1779,7 @@ unsafe fn draw_temperature_bubble(dc: HDC, font: HFONT, thumb: SliderThumb, kelv
     let _ = SelectObject(dc, old_pen);
     let _ = DeleteObject(brush.into());
     let _ = DeleteObject(pen.into());
-    let cover = CreatePen(PS_SOLID, 2, COLORREF(0x00FFFFFF));
+    let cover = CreatePen(PS_SOLID, 2, COLORREF(ui().surface));
     let old = SelectObject(dc, cover.into());
     let _ = MoveToEx(dc, tip_x - 7, body_bottom - 1, None);
     let _ = LineTo(dc, tip_x + 7, body_bottom - 1);
@@ -1701,7 +1788,7 @@ unsafe fn draw_temperature_bubble(dc: HDC, font: HFONT, thumb: SliderThumb, kelv
     text(
         dc,
         font,
-        NAVY,
+        ui().status,
         left + (body_w - size.cx) / 2,
         body_top + (body_h - size.cy) / 2,
         &label,
@@ -1734,7 +1821,7 @@ unsafe fn draw_curve(dc: HDC, solar_hours: f64, sun_up: bool) {
     let marker_t = (solar_hours / 24.0).clamp(0.0, 0.999);
     let marker_x = f64::from(left) + marker_t * f64::from(width.max(1));
     let marker_y = curve_y(marker_t, top, bottom);
-    let fill = if sun_up { 0x0064B4F0 } else { BLUE };
+    let fill_color = if sun_up { ui().curve_hi } else { ui().accent };
     paint_marker(
         &mut pixels,
         width,
@@ -1743,7 +1830,7 @@ unsafe fn draw_curve(dc: HDC, solar_hours: f64, sun_up: bool) {
         origin_y,
         marker_x,
         marker_y,
-        fill,
+        fill_color,
     );
     blit_alpha(dc, left, origin_y, width, height, &pixels);
     let rule_y = bottom + 9;
@@ -1836,7 +1923,7 @@ fn paint_marker(
                     height,
                     x - origin_x,
                     y - origin_y,
-                    0x00FFFFFF,
+                    ui().marker_ring,
                     (ring_hits / total * 255.0).round() as u8,
                 );
             }
@@ -1940,7 +2027,7 @@ fn curve_y(t: f64, top: i32, bottom: i32) -> f64 {
 
 fn curve_color(t: f64) -> u32 {
     let day = ((curve_altitude(t) + 1.0) * 0.5).clamp(0.0, 1.0);
-    mix(0x00402828, 0x0064B4F0, day)
+    mix(ui().curve_lo, ui().curve_hi, day)
 }
 
 fn mix(from: u32, to: u32, t: f64) -> u32 {
@@ -1954,8 +2041,8 @@ fn mix(from: u32, to: u32, t: f64) -> u32 {
 }
 
 unsafe fn draw_step_button(dc: HDC, font: HFONT, rect: RECT, label: &str) {
-    let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(BLUE));
+    let brush = CreateSolidBrush(COLORREF(ui().surface));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().accent));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, 10, 10);
@@ -1967,7 +2054,7 @@ unsafe fn draw_step_button(dc: HDC, font: HFONT, rect: RECT, label: &str) {
     text(
         dc,
         font,
-        BLUE_DEEP,
+        ui().accent_text,
         rect.left + (rect.right - rect.left - size.cx) / 2,
         rect.top + (rect.bottom - rect.top - size.cy) / 2,
         label,
@@ -2628,7 +2715,7 @@ unsafe fn about_layout(dc: HDC) -> AboutLayout {
         let _ = draw_wrapped(
             dc,
             body,
-            INK,
+            ui().ink,
             &mut description,
             &description_text,
             DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT,
@@ -2775,7 +2862,7 @@ unsafe fn paint_about(hwnd: HWND) {
     let buffer = CreateCompatibleDC(Some(window_dc));
     let bitmap = CreateCompatibleBitmap(window_dc, client.right.max(1), client.bottom.max(1));
     let previous = SelectObject(buffer, bitmap.into());
-    fill(buffer, client, BG);
+    fill(buffer, client, ui().bg);
     let _ = SetBkMode(buffer, TRANSPARENT);
     let layout = about_layout(buffer);
     let icon = APP.with(|app| app.borrow().about_icon);
@@ -2796,11 +2883,11 @@ unsafe fn paint_about(hwnd: HWND) {
         let app = app.borrow();
         (app.font_header, app.font_body, app.font_small)
     });
-    text(buffer, header, INK, layout.title.x, layout.title.y, APP_NAME);
+    text(buffer, header, ui().ink, layout.title.x, layout.title.y, APP_NAME);
     text(
         buffer,
         small,
-        MUTED,
+        ui().muted,
         layout.version.x,
         layout.version.y,
         &about_version(),
@@ -2809,7 +2896,7 @@ unsafe fn paint_about(hwnd: HWND) {
     let _ = draw_wrapped(
         buffer,
         body,
-        INK,
+        ui().ink,
         &mut description,
         &tr("about-description"),
         DT_WORDBREAK | DT_NOPREFIX,
@@ -2817,7 +2904,7 @@ unsafe fn paint_about(hwnd: HWND) {
     text(
         buffer,
         small,
-        MUTED,
+        ui().muted,
         layout.copyright.x,
         layout.copyright.y,
         ABOUT_COPYRIGHT,
@@ -2827,7 +2914,7 @@ unsafe fn paint_about(hwnd: HWND) {
         text(
             buffer,
             underline,
-            BLUE_DEEP,
+            ui().accent_text,
             link.rect.left,
             link.rect.top,
             &about_link_label(link.label),
@@ -2874,6 +2961,7 @@ unsafe extern "system" fn about_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    note_caption(hwnd, msg);
     match msg {
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
@@ -3150,6 +3238,7 @@ unsafe extern "system" fn city_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    note_caption(hwnd, msg);
     match msg {
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
@@ -3186,10 +3275,15 @@ unsafe extern "system" fn city_proc(
             LRESULT(0)
         }
         WM_CTLCOLOREDIT => {
+            let menu = menu_colors();
             let dc = HDC(wparam.0 as *mut core::ffi::c_void);
-            let _ = SetTextColor(dc, COLORREF(GetSysColor(COLOR_MENUTEXT)));
-            let _ = SetBkColor(dc, COLORREF(GetSysColor(COLOR_MENU)));
-            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
+            let _ = SetTextColor(dc, COLORREF(menu.text));
+            let _ = SetBkColor(dc, COLORREF(menu.bg));
+            if appearance::is_dark() {
+                LRESULT(appearance::field_brush().0 as isize)
+            } else {
+                LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
+            }
         }
         WM_LBUTTONDOWN => {
             let mut client = RECT::default();
@@ -3550,10 +3644,11 @@ unsafe fn paint_city_menu(hwnd: HWND) {
     let scroll = CITY_SCROLL.with(|cell| cell.get());
     let hot = CITY_HOT.with(|cell| cell.get());
     let font = HFONT(CITY_FONT.with(|cell| cell.get()) as *mut core::ffi::c_void);
-    let menu_color = GetSysColor(COLOR_MENU);
-    let text_color = GetSysColor(COLOR_MENUTEXT);
-    let hot_color = GetSysColor(COLOR_HIGHLIGHT);
-    let hot_text = GetSysColor(COLOR_HIGHLIGHTTEXT);
+    let menu = menu_colors();
+    let menu_color = menu.bg;
+    let text_color = menu.text;
+    let hot_color = menu.hot;
+    let hot_text = menu.hot_text;
     fill(buffer, client, menu_color);
     let _ = SetBkMode(buffer, TRANSPARENT);
     let line = RECT {
@@ -3562,7 +3657,7 @@ unsafe fn paint_city_menu(hwnd: HWND) {
         right: client.right,
         bottom: row,
     };
-    fill(buffer, line, text_color);
+    fill(buffer, line, menu.rule);
     let shown = shown_place_count();
     let max_scroll = (shown - CITY_MENU_ROWS).max(0);
     let labels = PLACE_FILTER.with(|filter| {
@@ -3619,7 +3714,7 @@ unsafe fn paint_city_menu(hwnd: HWND) {
         right: client.right,
         bottom: coord_top + 1,
     };
-    fill(buffer, divider, text_color);
+    fill(buffer, divider, menu.rule);
     let coord_label = tr("coordinates");
     let coord_color = if coord_hot { hot_text } else { text_color };
     text(
@@ -4412,6 +4507,7 @@ unsafe fn windows_ui_language() -> String {
 }
 
 thread_local! {
+    static COORD_HWND: Cell<isize> = const { Cell::new(0) };
     static COORD_LAT: Cell<isize> = const { Cell::new(0) };
     static COORD_LON: Cell<isize> = const { Cell::new(0) };
 }
@@ -4539,6 +4635,7 @@ fn open_coordinates(parent: HWND) {
             return;
         };
         set_window_title(hwnd, &tr("coordinates"));
+        COORD_HWND.with(|cell| cell.set(hwnd.0 as isize));
         let _ = EnableWindow(parent, false);
         let _ = SetForegroundWindow(hwnd);
     }
@@ -4559,14 +4656,14 @@ unsafe fn paint_coordinates(hwnd: HWND) {
     let buffer = CreateCompatibleDC(Some(window_dc));
     let bitmap = CreateCompatibleBitmap(window_dc, client.right.max(1), client.bottom.max(1));
     let previous = SelectObject(buffer, bitmap.into());
-    fill(buffer, client, BG);
+    fill(buffer, client, ui().bg);
     let _ = SetBkMode(buffer, TRANSPARENT);
     let font = APP.with(|app| app.borrow().font_body);
     let metrics = coord_metrics_dc(buffer, font);
     text(
         buffer,
         font,
-        MUTED,
+        ui().muted,
         metrics.lat_label.x,
         metrics.lat_label.y,
         &tr("latitude"),
@@ -4574,7 +4671,7 @@ unsafe fn paint_coordinates(hwnd: HWND) {
     text(
         buffer,
         font,
-        MUTED,
+        ui().muted,
         metrics.lon_label.x,
         metrics.lon_label.y,
         &tr("longitude"),
@@ -4632,6 +4729,7 @@ unsafe extern "system" fn coord_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    note_caption(hwnd, msg);
     match msg {
         WM_CREATE => {
             let (lat, lon) = APP.with(|app| {
@@ -4651,12 +4749,7 @@ unsafe extern "system" fn coord_proc(
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
-        WM_CTLCOLOREDIT => {
-            let dc = HDC(wparam.0 as *mut core::ffi::c_void);
-            let _ = SetTextColor(dc, COLORREF(BLUE_DEEP));
-            let _ = SetBkColor(dc, COLORREF(0x00FFFFFF));
-            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
-        }
+        WM_CTLCOLOREDIT => paint_edit(HDC(wparam.0 as *mut core::ffi::c_void), ui().accent_text),
         WM_PAINT => {
             paint_coordinates(hwnd);
             LRESULT(0)
@@ -4677,6 +4770,7 @@ unsafe extern "system" fn coord_proc(
         }
         WM_DESTROY => {
             let parent = GetParent(hwnd).unwrap_or_default();
+            COORD_HWND.with(|cell| cell.set(0));
             COORD_LAT.with(|cell| cell.set(0));
             COORD_LON.with(|cell| cell.set(0));
             if !parent.0.is_null() {
@@ -5218,6 +5312,7 @@ unsafe extern "system" fn save_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    note_caption(hwnd, msg);
     match msg {
         WM_CREATE => {
             let instance = GetModuleHandleA(None).unwrap_or_default();
@@ -5284,12 +5379,7 @@ unsafe extern "system" fn save_proc(
             paint_save(hwnd);
             LRESULT(0)
         }
-        WM_CTLCOLOREDIT => {
-            let dc = HDC(wparam.0 as *mut core::ffi::c_void);
-            let _ = SetTextColor(dc, COLORREF(INK));
-            let _ = SetBkColor(dc, COLORREF(0x00FFFFFF));
-            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
-        }
+        WM_CTLCOLOREDIT => paint_edit(HDC(wparam.0 as *mut core::ffi::c_void), ui().ink),
         WM_LBUTTONDOWN => {
             save_click(hwnd, lparam_point(lparam));
             LRESULT(0)
@@ -5494,7 +5584,7 @@ unsafe fn paint_save(hwnd: HWND) {
     let buffer = CreateCompatibleDC(Some(window_dc));
     let bitmap = CreateCompatibleBitmap(window_dc, client.right.max(1), client.bottom.max(1));
     let previous = SelectObject(buffer, bitmap.into());
-    fill(buffer, client, BG);
+    fill(buffer, client, ui().bg);
     let _ = SetBkMode(buffer, TRANSPARENT);
     let (fonts, name, editing) = APP.with(|app| {
         let app = app.borrow();
@@ -5512,12 +5602,12 @@ unsafe fn paint_save(hwnd: HWND) {
             .is_some_and(|save| save.selected.is_none());
         ([app.font_body, app.font_small], name, editing)
     });
-    text(buffer, fonts[1], MUTED, 24, 16, &tr("name"));
+    text(buffer, fonts[1], ui().muted, 24, 16, &tr("name"));
     draw_save_name(buffer, fonts[0], save_name_rect(), &name);
     if editing {
         let field = save_edit_rect();
-        let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-        let pen = CreatePen(PS_SOLID, 1, COLORREF(LINE));
+        let brush = CreateSolidBrush(COLORREF(ui().surface));
+        let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().line));
         let old_brush = SelectObject(buffer, brush.into());
         let old_pen = SelectObject(buffer, pen.into());
         let _ = RoundRect(
@@ -5557,8 +5647,8 @@ unsafe fn paint_save(hwnd: HWND) {
 }
 
 unsafe fn draw_checkbox(dc: HDC, font: HFONT, mark: RECT, label: &str, on: bool) {
-    let brush = CreateSolidBrush(COLORREF(if on { BLUE } else { 0x00FFFFFF }));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(if on { BLUE_DEEP } else { LINE }));
+    let brush = CreateSolidBrush(COLORREF(if on { ui().accent } else { ui().surface }));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(if on { ui().accent_text } else { ui().line }));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = RoundRect(dc, mark.left, mark.top, mark.right, mark.bottom, 6, 6);
@@ -5567,7 +5657,7 @@ unsafe fn draw_checkbox(dc: HDC, font: HFONT, mark: RECT, label: &str, on: bool)
     let _ = DeleteObject(brush.into());
     let _ = DeleteObject(pen.into());
     if on {
-        let pen = CreatePen(PS_SOLID, 2, COLORREF(0x00FFFFFF));
+        let pen = CreatePen(PS_SOLID, 2, COLORREF(ui().on_accent));
         let old = SelectObject(dc, pen.into());
         let _ = MoveToEx(dc, mark.left + 5, mark.top + 12, None);
         let _ = LineTo(dc, mark.left + 10, mark.bottom - 6);
@@ -5575,7 +5665,7 @@ unsafe fn draw_checkbox(dc: HDC, font: HFONT, mark: RECT, label: &str, on: bool)
         let _ = SelectObject(dc, old);
         let _ = DeleteObject(pen.into());
     }
-    text(dc, font, INK, mark.right + 10, mark.top + 2, label);
+    text(dc, font, ui().ink, mark.right + 10, mark.top + 2, label);
 }
 
 fn screen_from(rect: RECT) -> ScreenRect {
@@ -5649,8 +5739,8 @@ unsafe fn save_edit_text() -> String {
 }
 
 unsafe fn draw_save_name(dc: HDC, font: HFONT, rect: RECT, label: &str) {
-    let brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(LINE));
+    let brush = CreateSolidBrush(COLORREF(ui().surface));
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().line));
     let old_brush = SelectObject(dc, brush.into());
     let old_pen = SelectObject(dc, pen.into());
     let _ = RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, 12, 12);
@@ -5658,8 +5748,8 @@ unsafe fn draw_save_name(dc: HDC, font: HFONT, rect: RECT, label: &str) {
     let _ = SelectObject(dc, old_pen);
     let _ = DeleteObject(brush.into());
     let _ = DeleteObject(pen.into());
-    text(dc, font, INK, rect.left + 14, rect.top + 8, label);
-    let pen = CreatePen(PS_SOLID, 1, COLORREF(MUTED));
+    text(dc, font, ui().ink, rect.left + 14, rect.top + 8, label);
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(ui().muted));
     let old = SelectObject(dc, pen.into());
     let x = rect.right - 22;
     let y = rect.top + 16;
@@ -5914,6 +6004,7 @@ unsafe extern "system" fn time_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    note_caption(hwnd, msg);
     match msg {
         WM_CREATE => {
             APP.with(|app| {
@@ -5924,12 +6015,7 @@ unsafe extern "system" fn time_proc(
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
-        WM_CTLCOLOREDIT => {
-            let dc = HDC(wparam.0 as *mut core::ffi::c_void);
-            let _ = SetTextColor(dc, COLORREF(BLUE_DEEP));
-            let _ = SetBkColor(dc, COLORREF(0x00FFFFFF));
-            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
-        }
+        WM_CTLCOLOREDIT => paint_edit(HDC(wparam.0 as *mut core::ffi::c_void), ui().accent_text),
         WM_PAINT => {
             paint_time(hwnd);
             LRESULT(0)
@@ -6172,7 +6258,7 @@ unsafe fn paint_time(hwnd: HWND) {
     let buffer = CreateCompatibleDC(Some(window_dc));
     let bitmap = CreateCompatibleBitmap(window_dc, client.right.max(1), client.bottom.max(1));
     let previous = SelectObject(buffer, bitmap.into());
-    fill(buffer, client, BG);
+    fill(buffer, client, ui().bg);
     let _ = SetBkMode(buffer, TRANSPARENT);
     let (body, clock_font, draft, editing) = APP.with(|app| {
         let app = app.borrow();
@@ -6264,15 +6350,15 @@ unsafe fn paint_time_clock(
 ) {
     let time_box = time_clock_rect(top);
     if editing {
-        fill(dc, time_box, 0x00FFFFFF);
-        stroke_rect(dc, time_box, 0x00000000);
+        fill(dc, time_box, ui().surface);
+        stroke_rect(dc, time_box, ui().ink);
     } else {
         let clock = format_clock_local(minute);
         let size = text_size(dc, clock_font, &clock);
         text(
             dc,
             clock_font,
-            BLUE_DEEP,
+            ui().accent_text,
             time_box.left + (time_box.right - time_box.left - size.cx) / 2,
             time_box.top + (time_box.bottom - time_box.top - size.cy) / 2,
             &clock,
