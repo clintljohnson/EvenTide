@@ -78,8 +78,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcA, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageA, FindWindowA,
     DrawIconEx, GetClientRect, GetCursorPos, GetMessageA, GetParent, GetSystemMetrics,
     GetWindowRect,
-    GetWindowTextW, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, LoadIconW,
+    GetWindowTextW, HideCaret, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, LoadIconW,
     PostMessageA, PostQuitMessage, RegisterClassExA, SendMessageW, SetCursor, SetForegroundWindow,
+    ShowCaret,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
     ShowWindow, SystemParametersInfoW, TrackPopupMenu, TranslateMessage, CS_DBLCLKS,
     CW_USEDEFAULT, DI_NORMAL, GWLP_WNDPROC, HICON, HMENU, HTCLIENT, HWND_TOPMOST, ICON_BIG,
@@ -312,6 +313,7 @@ struct App {
     time_edit: HWND,
     time_field: Option<TimeField>,
     location_hit: RECT,
+    location_hover: bool,
     about_hwnd: HWND,
     about_icon: HICON,
     about_modal: bool,
@@ -358,6 +360,7 @@ thread_local! {
         time_edit: HWND::default(),
         time_field: None,
         location_hit: RECT::default(),
+        location_hover: false,
         about_hwnd: HWND::default(),
         about_icon: HICON::default(),
         about_modal: false,
@@ -702,8 +705,10 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcA(hwnd, msg, wparam, lparam)
         }
         WM_MOUSEMOVE => {
-            update_color_hover(hwnd, lparam_point(lparam));
-            if drag_slider(lparam_point(lparam)) {
+            let point = lparam_point(lparam);
+            update_color_hover(hwnd, point);
+            update_location_hover(hwnd, point);
+            if drag_slider(point) {
                 apply_gamma();
                 sync_lenses();
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -714,7 +719,10 @@ unsafe extern "system" fn wnd_proc(
             let hovered = APP.with(|app| {
                 let mut app = app.borrow_mut();
                 app.tracking_mouse = false;
-                app.color_hover.take().is_some()
+                let color = app.color_hover.take().is_some();
+                let location = app.location_hover;
+                app.location_hover = false;
+                color || location
             });
             if hovered {
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -722,7 +730,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SETCURSOR => {
-            if color_button_cursor() {
+            if color_button_cursor() || location_cursor() {
                 LRESULT(1)
             } else {
                 DefWindowProcA(hwnd, msg, wparam, lparam)
@@ -1173,11 +1181,19 @@ unsafe fn paint(hwnd: HWND) {
     let city_size = text_size(buffer, fonts[1], &city_label);
     let line_w = degrees_size.cx + gap_size.cx + city_size.cx;
     let line_x = right - line_w;
-    text(buffer, fonts[1], ui().muted, line_x, line_y, &degrees);
+    let text_h = degrees_size.cy.max(city_size.cy).max(14);
+    let location_hot = APP.with(|app| app.borrow().location_hover);
+    let coord_color = if location_hot { ui().ink } else { ui().muted };
+    let city_color = if location_hot {
+        ui().accent_text
+    } else {
+        ui().ink
+    };
+    text(buffer, fonts[1], coord_color, line_x, line_y, &degrees);
     text(
         buffer,
         fonts[1],
-        ui().muted,
+        coord_color,
         line_x + degrees_size.cx,
         line_y,
         gap,
@@ -1185,12 +1201,20 @@ unsafe fn paint(hwnd: HWND) {
     text(
         buffer,
         fonts[1],
-        ui().ink,
+        city_color,
         line_x + degrees_size.cx + gap_size.cx,
         line_y,
         &city_label,
     );
-    let text_h = degrees_size.cy.max(city_size.cy).max(14);
+    if location_hot {
+        draw_hline(
+            buffer,
+            line_x,
+            line_x + line_w,
+            line_y + text_h - 1,
+            ui().accent_text,
+        );
+    }
     APP.with(|app| {
         app.borrow_mut().location_hit = RECT {
             left: line_x - 8,
@@ -1477,6 +1501,43 @@ unsafe fn color_button_at(hwnd: HWND, point: POINT) -> Option<ScreenRect> {
     });
     let _ = ReleaseDC(Some(hwnd), dc);
     found
+}
+
+fn update_location_hover(hwnd: HWND, point: POINT) {
+    let over = APP.with(|app| {
+        let hit = app.borrow().location_hit;
+        hit.right > hit.left && point_in(point, hit)
+    });
+    let changed = APP.with(|app| {
+        let mut app = app.borrow_mut();
+        let changed = app.location_hover != over;
+        app.location_hover = over;
+        changed
+    });
+    if changed {
+        let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    }
+}
+
+fn location_cursor() -> bool {
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point).is_err() } {
+        return false;
+    }
+    let hwnd = APP.with(|app| app.borrow().hwnd);
+    if hwnd.0.is_null() || !unsafe { ScreenToClient(hwnd, &mut point).as_bool() } {
+        return false;
+    }
+    let over = APP.with(|app| {
+        let hit = app.borrow().location_hit;
+        hit.right > hit.left && point_in(point, hit)
+    });
+    if over {
+        unsafe {
+            SetCursor(Some(LoadCursorW(None, IDC_HAND).unwrap_or_default()));
+        }
+    }
+    over
 }
 
 fn color_button_cursor() -> bool {
@@ -2059,6 +2120,18 @@ unsafe fn draw_step_button(dc: HDC, font: HFONT, rect: RECT, label: &str) {
         rect.top + (rect.bottom - rect.top - size.cy) / 2,
         label,
     );
+}
+
+unsafe fn draw_hline(dc: HDC, x0: i32, x1: i32, y: i32, color: u32) {
+    if x1 <= x0 {
+        return;
+    }
+    let pen = CreatePen(PS_SOLID, 1, COLORREF(color));
+    let old = SelectObject(dc, pen.into());
+    let _ = MoveToEx(dc, x0, y, None);
+    let _ = LineTo(dc, x1, y);
+    let _ = SelectObject(dc, old);
+    let _ = DeleteObject(pen.into());
 }
 
 unsafe fn fill(dc: HDC, rect: RECT, color: u32) {
@@ -3421,13 +3494,6 @@ unsafe fn create_place_search(parent: HWND, font: HFONT) {
             Some(LPARAM(1)),
         );
     }
-    let cue = wide_z(&tr("search"));
-    let _ = SendMessageW(
-        edit,
-        0x1501,
-        Some(WPARAM(0)),
-        Some(LPARAM(cue.as_ptr() as isize)),
-    );
     let previous = SetWindowLongPtrW(edit, GWLP_WNDPROC, place_edit_proc as *const () as isize);
     PLACE_EDIT_PROC.with(|cell| cell.set(previous));
     PLACE_EDIT.with(|cell| cell.set(edit.0 as isize));
@@ -3439,6 +3505,11 @@ unsafe extern "system" fn place_edit_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_PAINT {
+        let result = forward_place_edit(hwnd, msg, wparam, lparam);
+        paint_place_cue(hwnd);
+        return result;
+    }
     if msg == WM_KEYDOWN {
         let key = wparam.0 as u16;
         if key == VK_ESCAPE.0 {
@@ -3461,12 +3532,52 @@ unsafe extern "system" fn place_edit_proc(
             return LRESULT(0);
         }
     }
+    forward_place_edit(hwnd, msg, wparam, lparam)
+}
+
+unsafe fn forward_place_edit(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let previous = PLACE_EDIT_PROC.with(|cell| cell.get());
     if previous == 0 {
         return DefWindowProcA(hwnd, msg, wparam, lparam);
     }
     let proc: WNDPROC = std::mem::transmute(previous);
     CallWindowProcW(proc, hwnd, msg, wparam, lparam)
+}
+
+/// Gray prompt drawn when the place field is empty. The system cue stays hidden
+/// on this dark field, so the prompt is painted after the edit's own paint.
+unsafe fn paint_place_cue(hwnd: HWND) {
+    if !edit_text(hwnd, 8).is_empty() {
+        return;
+    }
+    let dc = GetDC(Some(hwnd));
+    if dc.is_invalid() {
+        return;
+    }
+    let menu = menu_colors();
+    let cue = tr("search");
+    let font = HFONT(SendMessageW(hwnd, 0x0031, None, None).0 as *mut core::ffi::c_void);
+    let mut client = RECT::default();
+    let _ = GetClientRect(hwnd, &mut client);
+    let size = text_size(dc, font, &cue);
+    let margins = SendMessageW(hwnd, 0x00D4, None, None).0 as i32;
+    let left = (margins & 0xFFFF).max(1);
+    let top = ((client.bottom - size.cy) / 2).max(0);
+    let _ = SetBkMode(dc, TRANSPARENT);
+    text(dc, font, ghost_color(menu.bg, menu.text), left, top, &cue);
+    if HideCaret(Some(hwnd)).is_ok() {
+        let _ = ShowCaret(Some(hwnd));
+    }
+    let _ = ReleaseDC(Some(hwnd), dc);
+}
+
+fn ghost_color(bg: u32, ink: u32) -> u32 {
+    let channel = |shift: u32| {
+        let from = ((bg >> shift) & 0xFF) as i32;
+        let to = ((ink >> shift) & 0xFF) as i32;
+        (from + (to - from) * 55 / 100).clamp(0, 255) as u32
+    };
+    channel(0) | (channel(8) << 8) | (channel(16) << 16)
 }
 
 fn set_city_hot(index: i32) {
