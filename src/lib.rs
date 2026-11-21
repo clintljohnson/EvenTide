@@ -508,10 +508,11 @@ pub fn slider_preview_kelvin(
 
 /// Kelvin for one monitor.
 /// A held slider is previewed on every monitor, so the color toggle is ignored until release.
-/// With no hold, color-on follows the schedule and color-off uses the other half of the day.
+/// With no hold, color-on follows `active` (the fading schedule) and color-off uses the other half of the day.
 pub fn monitor_kelvin(
     color_on: bool,
     sun_up: bool,
+    active: i32,
     day: i32,
     night: i32,
     held: Option<SliderThumb>,
@@ -522,13 +523,7 @@ pub fn monitor_kelvin(
             SliderThumb::Night => night,
         };
     }
-    tile_kelvin(
-        color_on,
-        sun_up,
-        if sun_up { day } else { night },
-        day,
-        night,
-    )
+    tile_kelvin(color_on, sun_up, active, day, night)
 }
 
 pub fn step_wake_minute(minute: i32, steps: i32) -> i32 {
@@ -647,6 +642,7 @@ pub fn plan_ramps(
     devices: &[(String, u32)],
     color: &MonitorSet,
     sun_up: bool,
+    active: i32,
     day: i32,
     night: i32,
     held: Option<SliderThumb>,
@@ -659,6 +655,7 @@ pub fn plan_ramps(
             ramp: scheduled_ramp(monitor_kelvin(
                 color.contains(*number),
                 sun_up,
+                active,
                 day,
                 night,
                 held,
@@ -2721,7 +2718,7 @@ mod tests {
             (r"\\.\DISPLAY6".to_string(), 6),
         ];
         let color = MonitorSet::Only(vec![1, 2, 3, 5, 6]);
-        let plans = plan_ramps(&devices, &color, false, 4750, 4100, None);
+        let plans = plan_ramps(&devices, &color, false, 4100, 4750, 4100, None);
         let day = scheduled_ramp(4750);
         let night = scheduled_ramp(4100);
         let fourth = plans.iter().find(|plan| plan.display_number == 4).unwrap();
@@ -2730,21 +2727,34 @@ mod tests {
         for plan in plans.iter().filter(|plan| plan.display_number != 4) {
             assert_eq!(plan.ramp, night);
         }
-        let hold_day = plan_ramps(&devices, &color, false, 4750, 4100, Some(SliderThumb::Day));
+        let hold_day = plan_ramps(
+            &devices,
+            &color,
+            false,
+            4100,
+            4750,
+            4100,
+            Some(SliderThumb::Day),
+        );
         assert!(hold_day.iter().all(|plan| plan.ramp == day));
         let hold_night = plan_ramps(
             &devices,
             &color,
             false,
+            4100,
             4750,
             4100,
             Some(SliderThumb::Night),
         );
         assert!(hold_night.iter().all(|plan| plan.ramp == night));
-        assert_eq!(monitor_kelvin(false, true, 4750, 4100, None), 4100);
-        assert_eq!(monitor_kelvin(true, true, 4750, 4100, None), 4750);
+        assert_eq!(monitor_kelvin(false, true, 4750, 4750, 4100, None), 4100);
+        assert_eq!(monitor_kelvin(true, true, 4750, 4750, 4100, None), 4750);
         assert_eq!(
-            monitor_kelvin(false, true, 4750, 4100, Some(SliderThumb::Day)),
+            monitor_kelvin(true, false, 4950, 6500, 3400, None),
+            4950
+        );
+        assert_eq!(
+            monitor_kelvin(false, true, 4750, 4750, 4100, Some(SliderThumb::Day)),
             4750
         );
         let dim = MonitorSet::Only(vec![2, 3, 4, 5, 6]);

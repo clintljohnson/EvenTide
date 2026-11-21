@@ -38,6 +38,8 @@ const INV_GAMMA_22: f64 = 0.4545454680919647;
 
 /// Minutes after midnight used when a saved wake time is missing. 420 is 7:00 AM.
 pub const DEFAULT_WAKE_MINUTE: i32 = 420;
+/// How long a horizon crossing spends moving from the previous temperature to the next.
+pub const COLOR_FADE_SECONDS: i32 = 2 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
@@ -317,6 +319,14 @@ impl UtcTime {
             second: self.second,
         }
     }
+
+    pub fn add_seconds(self, seconds: i32) -> Self {
+        let total = self.second as i32 + seconds;
+        Self {
+            second: total.rem_euclid(60) as u32,
+            ..self.add_minutes(total.div_euclid(60))
+        }
+    }
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -355,8 +365,9 @@ pub struct Schedule {
     pub sunrise_minute: i32,
 }
 
-/// Day color while the solar altitude is non-negative, night color otherwise.
-/// The sign test is the one around the call to `0x42B520` inside `0x42A850`.
+/// Day color while the sun is up, night color after it has set.
+/// Each horizon crossing spends `COLOR_FADE_SECONDS` blending from the previous
+/// temperature to the new one. The sign of the altitude still chooses the target.
 /// The bedtime color and the "Getting sleepy?" mode are stored and documented;
 /// the clock predicate that selects them was not reduced.
 pub fn schedule(local: UtcTime, settings: Settings, utc_offset_minutes: i32) -> Schedule {
@@ -364,17 +375,33 @@ pub fn schedule(local: UtcTime, settings: Settings, utc_offset_minutes: i32) -> 
     let solar = solar_position(utc, settings.latitude_deg(), settings.longitude_deg());
     let up = solar.altitude_deg >= 0.0;
     let status = if up { SunStatus::Up } else { SunStatus::Set };
-    let kelvin = if up {
-        settings.day_kelvin
-    } else {
-        settings.night_kelvin
-    };
     let (minutes_until_marker, marker_is_sunset) =
         minutes_until_sun_event(local, settings, utc_offset_minutes, up);
     let minutes_since_sunset = if up {
         0
     } else {
         minutes_since_sunset(local, settings, utc_offset_minutes)
+    };
+    let minutes_since_rise = if up {
+        minutes_since_sunrise(local, settings, utc_offset_minutes)
+    } else {
+        0
+    };
+    let seconds_since = seconds_since_horizon(
+        local,
+        settings,
+        utc_offset_minutes,
+        up,
+        if up {
+            minutes_since_rise
+        } else {
+            minutes_since_sunset
+        },
+    );
+    let kelvin = if up {
+        blend_kelvin(settings.night_kelvin, settings.day_kelvin, seconds_since)
+    } else {
+        blend_kelvin(settings.day_kelvin, settings.night_kelvin, seconds_since)
     };
     let now_minute = (local.hour * 60 + local.minute) as i32;
     let sunset_offset = if up {
@@ -384,7 +411,7 @@ pub fn schedule(local: UtcTime, settings: Settings, utc_offset_minutes: i32) -> 
     };
     let sunset_minute = (now_minute + sunset_offset).rem_euclid(24 * 60);
     let sunrise_offset = if up {
-        -minutes_since_sunrise(local, settings, utc_offset_minutes)
+        -minutes_since_rise
     } else {
         minutes_until_marker
     };
@@ -400,6 +427,43 @@ pub fn schedule(local: UtcTime, settings: Settings, utc_offset_minutes: i32) -> 
         sunset_minute,
         sunrise_minute,
     }
+}
+
+/// 0 keeps `from`. `COLOR_FADE_SECONDS` and beyond lands on `to`.
+fn blend_kelvin(from: i32, to: i32, seconds_since: i32) -> i32 {
+    if seconds_since <= 0 {
+        return from;
+    }
+    if seconds_since >= COLOR_FADE_SECONDS {
+        return to;
+    }
+    let blended = f64::from(from)
+        + f64::from(to - from) * f64::from(seconds_since) / f64::from(COLOR_FADE_SECONDS);
+    blended.round() as i32
+}
+
+/// Whole seconds since the altitude sign flipped. Outside the two-minute window this
+/// returns `COLOR_FADE_SECONDS`, which selects the target temperature with no blend.
+fn seconds_since_horizon(
+    local: UtcTime,
+    settings: Settings,
+    utc_offset_minutes: i32,
+    sun_up: bool,
+    minutes_since: i32,
+) -> i32 {
+    if !(1..=2).contains(&minutes_since) {
+        return COLOR_FADE_SECONDS;
+    }
+    for step in 1..=COLOR_FADE_SECONDS {
+        let probe = local.add_seconds(-step);
+        let utc = probe.add_minutes(-utc_offset_minutes);
+        let alt =
+            solar_position(utc, settings.latitude_deg(), settings.longitude_deg()).altitude_deg;
+        if (alt >= 0.0) != sun_up {
+            return step;
+        }
+    }
+    COLOR_FADE_SECONDS
 }
 
 fn minutes_since_sunrise(local: UtcTime, settings: Settings, utc_offset_minutes: i32) -> i32 {
@@ -712,5 +776,83 @@ mod tests {
         assert_eq!(kelvin_from_fraction(1.0), 6500);
         assert_eq!(slider_fraction(6500), 1.0);
         assert_eq!(slider_fraction(1200), 0.0);
+    }
+
+    fn altitude_up(local: UtcTime, settings: Settings, offset: i32) -> bool {
+        let utc = local.add_minutes(-offset);
+        solar_position(utc, settings.latitude_deg(), settings.longitude_deg()).altitude_deg >= 0.0
+    }
+
+    /// First second at which the sun has the requested side of the horizon.
+    fn crossing_after(start: UtcTime, settings: Settings, offset: i32, want_up: bool) -> UtcTime {
+        let mut minute = 1;
+        let coarse = loop {
+            assert!(minute < 18 * 60, "no horizon crossing");
+            let sample = start.add_minutes(minute);
+            if altitude_up(sample, settings, offset) == want_up {
+                break minute;
+            }
+            minute += 1;
+        };
+        let base = start.add_minutes(coarse - 1);
+        for second in 0..120 {
+            let sample = base.add_seconds(second);
+            if altitude_up(sample, settings, offset) == want_up {
+                return sample;
+            }
+        }
+        panic!("crossing second not found");
+    }
+
+    #[test]
+    fn color_fades_for_two_minutes_across_both_horizons() {
+        let settings = settings(3240, -9000, 6500, 3400, 1900, 585);
+        let offset = -5 * 60;
+        let noon = UtcTime {
+            year: 2026,
+            month: 10,
+            day: 24,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        };
+        let sunset = crossing_after(noon, settings, offset, false);
+        assert!(altitude_up(sunset.add_seconds(-1), settings, offset));
+        assert_eq!(
+            schedule(sunset, settings, offset).kelvin,
+            blend_kelvin(6500, 3400, 1)
+        );
+        assert_eq!(
+            schedule(sunset.add_seconds(59), settings, offset).kelvin,
+            blend_kelvin(6500, 3400, 60)
+        );
+        assert!(
+            schedule(sunset.add_seconds(59), settings, offset).kelvin > 3400
+                && schedule(sunset.add_seconds(59), settings, offset).kelvin < 6500
+        );
+        assert_eq!(
+            schedule(sunset.add_seconds(120), settings, offset).kelvin,
+            3400
+        );
+
+        let midnight = UtcTime {
+            hour: 0,
+            minute: 0,
+            ..noon
+        };
+        let sunrise = crossing_after(midnight, settings, offset, true);
+        assert!(!altitude_up(sunrise.add_seconds(-1), settings, offset));
+        assert_eq!(
+            schedule(sunrise, settings, offset).kelvin,
+            blend_kelvin(3400, 6500, 1)
+        );
+        assert_eq!(
+            schedule(sunrise.add_seconds(59), settings, offset).kelvin,
+            blend_kelvin(3400, 6500, 60)
+        );
+        assert_eq!(
+            schedule(sunrise.add_seconds(120), settings, offset).kelvin,
+            6500
+        );
     }
 }

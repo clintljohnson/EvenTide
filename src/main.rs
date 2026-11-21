@@ -4118,7 +4118,7 @@ fn apply_gamma() -> bool {
             Some(number) => color.contains(number),
             None => matches!(color, MonitorSet::All),
         };
-        let ramp = scheduled_ramp(monitor_kelvin(on, sun_up, day, night, held));
+        let ramp = scheduled_ramp(monitor_kelvin(on, sun_up, planned.kelvin, day, night, held));
         let same = APP.with(|app| {
             app.borrow()
                 .last_ramps
